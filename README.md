@@ -126,6 +126,14 @@ If you want to run the script directly from the source code:
 
 Contributions are welcome! Please see the [Contributing Guidelines](CONTRIBUTING.md) for more information.
 
+## 🧪 Unit Testing
+
+The repository includes fast unit tests that validate FFmpeg argument generation without running FFmpeg.
+
+```bash
+python -m unittest discover -s tests
+```
+
 ## 📄 License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
