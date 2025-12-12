@@ -10,6 +10,24 @@ from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
 console = Console()
 
 
+def calculate_fps_from_frame_rate(frame_rate_str):
+    """
+    Calculate FPS from frame rate string like '30/1' or '60000/1001'.
+    """
+    try:
+        if '/' in frame_rate_str:
+            parts = frame_rate_str.split('/')
+            if len(parts) == 2:
+                num = float(parts[0])
+                den = float(parts[1])
+                if den != 0:
+                    return num / den
+        # If it's already a plain number or can be converted directly
+        return float(frame_rate_str)
+    except (ValueError, TypeError):
+        return 0.0
+
+
 def check_ffmpeg_ffprobe():
     """
     Checks if ffmpeg and ffprobe executables are available in the system's PATH.
@@ -59,6 +77,9 @@ def run_command(stream_spec, description="Processing...", show_progress=False):
             console.print(error_message)
             logging.error(f"ffmpeg error:{error_message}")
             return None
+        except KeyboardInterrupt:
+            console.print("\n[bold yellow]Operation cancelled by user.[/bold yellow]")
+            return None
     else:
         # For the progress bar, we must run ffmpeg as a subprocess and parse stderr.
         duration = 0
@@ -99,18 +120,28 @@ def run_command(stream_spec, description="Processing...", show_progress=False):
                 encoding='utf-8'
             )
 
-            for line in process.stderr:
-                logging.debug(f"ffmpeg stderr: {line.strip()}")
-                if "time=" in line and duration > 0:
-                    try:
-                        time_str = line.split("time=")[1].split(" ")[0].strip()
-                        h, m, s_parts = time_str.split(':')
-                        s = float(s_parts)
-                        elapsed_time = int(h) * 3600 + int(m) * 60 + s
-                        percent_complete = (elapsed_time / duration) * 100
-                        progress.update(task, completed=min(percent_complete, 100))
-                    except Exception:
-                        pass # Ignore any parsing errors
+            try:
+                for line in process.stderr:
+                    logging.debug(f"ffmpeg stderr: {line.strip()}")
+                    if "time=" in line and duration > 0:
+                        try:
+                            time_str = line.split("time=")[1].split(" ")[0].strip()
+                            h, m, s_parts = time_str.split(':')
+                            s = float(s_parts)
+                            elapsed_time = int(h) * 3600 + int(m) * 60 + s
+                            percent_complete = (elapsed_time / duration) * 100
+                            progress.update(task, completed=min(percent_complete, 100))
+                        except Exception:
+                            pass # Ignore any parsing errors
+            except KeyboardInterrupt:
+                # Handle Ctrl+C by terminating the process
+                console.print("\n[bold yellow]Operation cancelled by user. Terminating ffmpeg process...[/bold yellow]")
+                process.terminate()
+                try:
+                    process.wait(timeout=5)  # Wait up to 5 seconds for process to terminate
+                except subprocess.TimeoutExpired:
+                    process.kill()  # Force kill if it doesn't terminate gracefully
+                return None
 
             process.wait()
             progress.update(task, completed=100)
@@ -132,3 +163,93 @@ def has_audio_stream(file_path):
         return 'streams' in probe and len(probe['streams']) > 0
     except ffmpeg.Error:
         return False
+
+
+def parse_media_tracks(file_path):
+    """Parse all tracks (video, audio, subtitle) from a media file."""
+    try:
+        probe = ffmpeg.probe(file_path)
+        tracks = []
+        
+        for stream in probe.get('streams', []):
+            track_type = stream.get('codec_type', 'unknown')
+            if track_type in ['video', 'audio', 'subtitle']:
+                track_info = {
+                    'index': stream.get('index', 0),
+                    'type': track_type,
+                    'codec': stream.get('codec_name', 'unknown'),
+                    'codec_long': stream.get('codec_long_name', 'unknown'),
+                    'disposition': stream.get('disposition', {}),
+                    'tags': stream.get('tags', {}),
+                }
+                
+                # Add type-specific information
+                if track_type == 'video':
+                    track_info.update({
+                        'width': stream.get('width', 0),
+                        'height': stream.get('height', 0),
+                        'duration': stream.get('duration', 0),
+                        'fps': calculate_fps_from_frame_rate(stream.get('r_frame_rate', '0/1')),
+                        'bit_rate': stream.get('bit_rate', 'unknown'),
+                        'profile': stream.get('profile', 'unknown'),
+                        'level': stream.get('level', 'unknown'),
+                    })
+                elif track_type == 'audio':
+                    track_info.update({
+                        'channels': stream.get('channels', 0),
+                        'sample_rate': stream.get('sample_rate', 0),
+                        'duration': stream.get('duration', 0),
+                        'bit_rate': stream.get('bit_rate', 'unknown'),
+                        'language': stream.get('tags', {}).get('language', 'und'),
+                        'title': stream.get('tags', {}).get('title', ''),
+                    })
+                elif track_type == 'subtitle':
+                    track_info.update({
+                        'language': stream.get('tags', {}).get('language', 'und'),
+                        'title': stream.get('tags', {}).get('title', ''),
+                    })
+                
+                tracks.append(track_info)
+        
+        return tracks
+    except ffmpeg.Error as e:
+        console.print(f"[bold red]Error parsing media tracks: {e}[/bold red]")
+        return []
+
+
+def get_codec_options(track_type):
+    """Get available codec options for a specific track type."""
+    codec_options = {
+        'video': [
+            'libx264 (H.264)',
+            'libx265 (H.265/HEVC)',
+            'libvpx-vp9 (VP9)',
+            'libaom-av1 (AV1)',
+            'libvpx (VP8)'
+        ],
+        'audio': [
+            'aac',
+            'eac3',
+            'libmp3lame (MP3)',
+            'libfdk_aac (AAC)',
+            'libopus (Opus)',
+            'libflac (FLAC)',
+            'libvorbis (Vorbis)'
+        ],
+        'subtitle': [
+            'srt (SubRip)',
+            'ass (ASS)',
+            'mov_text (MP4)'
+        ]
+    }
+    return codec_options.get(track_type, [])
+
+
+def get_default_codec(track_type):
+    """Get default codec for a track type."""
+    defaults = {
+        'video': 'libx264 (H.264)',
+        'audio': 'aac',
+        'subtitle': 'srt (SubRip)'
+    }
+    return defaults.get(track_type, 'copy (no re-encoding)')

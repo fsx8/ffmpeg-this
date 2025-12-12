@@ -6,10 +6,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import questionary
 from rich.console import Console
 
-from peg_this.features.audio import extract_audio, remove_audio
-from peg_this.features.batch import batch_convert
-from peg_this.features.convert import convert_file
-from peg_this.features.crop import crop_video
+from peg_this.features.audio import extract_audio
+from peg_this.features.interactive_convert import convert_file_interactive
 from peg_this.features.inspect import inspect_file
 from peg_this.features.join import join_videos
 from peg_this.features.trim import trim_video
@@ -40,31 +38,34 @@ def action_menu(file_path):
             "Choose an action:",
             choices=[
                 "Inspect File Details",
-                "Convert",
+                "Modify Tracks",
                 "Trim Video",
-                "Crop Video (Visual)",
                 "Extract Audio",
-                "Remove Audio",
                 questionary.Separator(),
-                "Back to File List"
+                "Go back to file list"
             ],
             use_indicator=True
         ).ask()
 
-        if action is None or action == "Back to File List":
+        if action is None or action == "Go back to file list":
             break
 
         actions = {
             "Inspect File Details": inspect_file,
-            "Convert": convert_file,
+            "Modify Tracks": convert_file_interactive,
             "Trim Video": trim_video,
-            "Crop Video (Visual)": crop_video,
             "Extract Audio": extract_audio,
-            "Remove Audio": remove_audio,
         }
         # Ensure we have a valid action before calling
         if action in actions:
-            actions[action](file_path)
+            try:
+                result = actions[action](file_path)
+                # If the action returns "quit_to_main", we should return to main menu
+                if result == "quit_to_main":
+                    return
+            except KeyboardInterrupt:
+                console.print("\n[bold yellow]Operation cancelled by user.[/bold yellow]")
+                break
 
 
 def main_menu():
@@ -77,7 +78,6 @@ def main_menu():
             choices=[
                 "Process a Single Media File",
                 "Join Multiple Videos",
-                "Batch Convert All Media in Directory",
                 "Exit"
             ],
             use_indicator=True
@@ -92,15 +92,42 @@ def main_menu():
             if selected_file:
                 action_menu(selected_file)
         elif choice == "Join Multiple Videos":
-            join_videos()
-        elif choice == "Batch Convert All Media in Directory":
-            batch_convert()
+            try:
+                join_videos()
+            except KeyboardInterrupt:
+                console.print("\n[bold yellow]Operation cancelled by user.[/bold yellow]")
 
 
 def main():
     """Main entry point for the application script."""
     try:
-        main_menu()
+        # Check command line arguments
+        if len(sys.argv) == 1:
+            # No arguments provided, show main menu
+            main_menu()
+        elif len(sys.argv) == 2:
+            # One argument provided: treat as a file path (process) or directory (join)
+            input_path = sys.argv[1]
+
+            if os.path.isdir(input_path):
+                console.print(f"[bold green]Joining videos in: {os.path.abspath(input_path)}[/bold green]")
+                join_videos(input_path)
+                return
+
+            file_path = input_path
+            
+            # Validate that the file exists
+            if not os.path.isfile(file_path):
+                console.print(f"[bold red]Error: File '{file_path}' does not exist.[/bold red]")
+                return
+            
+            # Skip the main menu and go directly to action menu for the provided file
+            console.print(f"[bold green]Processing file: {os.path.basename(file_path)}[/bold green]")
+            action_menu(file_path)
+        else:
+            # More than one argument provided, show an error
+            console.print(f"[bold red]Error: Too many arguments provided. Usage: {sys.argv[0]} [optional_file_or_folder][/bold red]")
+            return
     except (KeyboardInterrupt, EOFError):
         logging.info("Operation cancelled by user.")
         console.print("[bold]Operation cancelled. Goodbye![/bold]")

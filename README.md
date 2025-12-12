@@ -19,11 +19,9 @@
 
 A powerful and user-friendly batch script for converting, manipulating, and inspecting media files using the power of FFmpeg. This script provides a simple command-line menu to perform common audio and video tasks without needing to memorize complex FFmpeg commands.
 
-
 <p align="center">
     <img src="/assets/peg.gif" width="720">
 </p>
-
 
 ## ✨ Features
 
@@ -34,17 +32,19 @@ A powerful and user-friendly batch script for converting, manipulating, and insp
 - **CLI Interface**: A user-friendly command-line interface that makes it easy to perform common tasks and navigate the tool's features.
 
 ## 🚀 Usage
+
 ### Prerequisite: Install FFmpeg
 
-> [NOTE]
-> `peg_this` uses a library called `ffmpeg-python` which acts as a controller for the main FFmpeg program. It does not include FFmpeg itself. Therefore, you must have FFmpeg installed on your system and available in your terminal's PATH.
+> [NOTE] > `peg_this` uses a library called `ffmpeg-python` which acts as a controller for the main FFmpeg program. It does not include FFmpeg itself. Therefore, you must have FFmpeg installed on your system and available in your terminal's PATH.
 
 For **macOS** users, the easiest way to install it is with [Homebrew](https://brew.sh/):
+
 ```bash
 brew install ffmpeg
 ```
 
 For **Windows** users, you can use a package manager like [Chocolatey](https://chocolatey.org/) or [Scoop](https://scoop.sh/):
+
 ```bash
 # Using Chocolatey
 choco install ffmpeg
@@ -58,6 +58,7 @@ For other systems, please see the official download page: **[ffmpeg.org/download
 There are three ways to use `peg_this`:
 
 ### 1. Pip Install (Recommended)
+
 This is the easiest way to get started. This will install the tool and all its dependencies.
 
 ```bash
@@ -71,6 +72,7 @@ peg_this
 ```
 
 ### 2. Download from Release
+
 If you prefer not to install the package, you can download a pre-built executable from the [Releases](https://github.com/hariharen9/ffmpeg-this/releases/latest) page.
 
 1.  Download the executable for your operating system (Windows, macOS, or Linux).
@@ -78,6 +80,7 @@ If you prefer not to install the package, you can download a pre-built executabl
 3.  Run the executable directly from your terminal.
 
 ### 3. Run from Source
+
 If you want to run the script directly from the source code:
 
 1.  **Clone the repository:**
