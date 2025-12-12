@@ -1,6 +1,6 @@
-questionary
-rich
-pyinstaller
-Pillow
-ffmpeg-python
-prompt_toolkit
+questionary==2.1.1
+rich==14.2.0
+pyinstaller==6.17.0
+Pillow==12.0.0
+ffmpeg-python==0.2.0
+prompt_toolkit==3.0.52

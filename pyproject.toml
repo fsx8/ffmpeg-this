@@ -20,10 +20,10 @@ classifiers = [
 ]
 dependencies = [
     "ffmpeg-python==0.2.0",
-    "questionary>=2.0.0",
-    "rich>=13.0.0",
-    "prompt_toolkit>=2.0,<4.0",
-    "Pillow>=9.0.0"
+    "questionary>=2.1.1",
+    "rich>=14.2.0",
+    "prompt_toolkit>=3.0.52,<4.0",
+    "Pillow>=12.0.0"
 ]
 
 [project.urls]
