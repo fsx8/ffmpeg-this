@@ -5,12 +5,6 @@ from pathlib import Path
 import questionary
 from rich.console import Console
 
-try:
-    import tkinter as tk
-    from tkinter import filedialog
-except ImportError:
-    tk = None
-
 console = Console()
 
 

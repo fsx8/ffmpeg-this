@@ -31,12 +31,7 @@ A powerful and user-friendly batch script for converting, manipulating, and insp
 - **Convert & Transcode**: Convert videos and audio to a wide range of popular formats (MP4, MKV, WebM, MP3, FLAC, WAV, GIF) with simple quality presets.
 - **Join Videos (Concatenate)**: Combine two or more videos into a single file. The tool automatically handles differences in resolution and audio sample rates for a seamless join.
 - **Trim (Cut) Videos**: Easily cut a video to a specific start and end time without re-encoding for fast, lossless clips.
-- **Visually Crop Videos**: An interactive tool that shows you a frame of the video, allowing you to click and drag to select the exact area you want to crop.
-- **Extract Audio**: Rip the audio track from any video file into MP3, FLAC, or WAV.
-- **Remove Audio**: Create a silent version of your video by stripping out all audio streams.
-- **Batch Conversion**: Convert all media files in the current directory to a specified format in one go.
 - **CLI Interface**: A user-friendly command-line interface that makes it easy to perform common tasks and navigate the tool's features.
-
 
 ## 🚀 Usage
 ### Prerequisite: Install FFmpeg

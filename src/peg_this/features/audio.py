@@ -27,12 +27,3 @@ def extract_audio(file_path):
     console.print(f"[bold green]Successfully extracted audio to {output_file}[/bold green]")
     questionary.press_any_key_to_continue().ask()
 
-
-def remove_audio(file_path):
-    """Create a silent version of a video."""
-    output_file = f"{Path(file_path).stem}_no_audio{Path(file_path).suffix}"
-    stream = ffmpeg.input(file_path).output(output_file, vcodec='copy', an=None, y=None)
-    
-    run_command(stream, "Removing audio track...", show_progress=True)
-    console.print(f"[bold green]Successfully removed audio, saved to {output_file}[/bold green]")
-    questionary.press_any_key_to_continue().ask()
