@@ -1,0 +1,13 @@
+2025-12-12 21:27:53,178 - ERROR - An unexpected error occurred.
+Traceback (most recent call last):
+  File "/var/tmp/vibe-kanban/worktrees/c2eb-fix-keyboard-nav/src/peg_this/peg_this.py", line 105, in main
+    main_menu()
+  File "/var/tmp/vibe-kanban/worktrees/c2eb-fix-keyboard-nav/src/peg_this/peg_this.py", line 76, in main_menu
+    choice = questionary.select(
+             ^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/vibe-kanban/worktrees/c2eb-fix-keyboard-nav/src/peg_this/utils/cancel_utils.py", line 41, in _wrapped
+    return factory(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/vibe-kanban/worktrees/c2eb-fix-keyboard-nav/venv/lib/python3.12/site-packages/questionary/prompts/select.py", line 277, in select
+    Application(
+TypeError: prompt_toolkit.application.application.Application() got multiple values for keyword argument 'key_bindings'
