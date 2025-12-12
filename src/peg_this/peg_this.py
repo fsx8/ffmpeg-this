@@ -13,6 +13,7 @@ from peg_this.features.crop import crop_video
 from peg_this.features.inspect import inspect_file
 from peg_this.features.join import join_videos
 from peg_this.features.trim import trim_video
+from peg_this.utils.cancel_utils import install_global_questionary_cancel_handling
 from peg_this.utils.ffmpeg_utils import check_ffmpeg_ffprobe
 from peg_this.utils.ui_utils import select_media_file
 
@@ -100,6 +101,7 @@ def main_menu():
 def main():
     """Main entry point for the application script."""
     try:
+        install_global_questionary_cancel_handling()
         main_menu()
     except (KeyboardInterrupt, EOFError):
         logging.info("Operation cancelled by user.")

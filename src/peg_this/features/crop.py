@@ -103,4 +103,5 @@ def crop_video(file_path):
     finally:
         if os.path.exists(preview_frame):
             os.remove(preview_frame)
-        questionary.press_any_key_to_continue().ask()
+
+    questionary.press_any_key_to_continue().ask()

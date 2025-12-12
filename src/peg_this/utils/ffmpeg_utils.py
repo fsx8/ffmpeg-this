@@ -1,6 +1,9 @@
+from __future__ import annotations
 
 import subprocess
 import logging
+import os
+import signal
 import sys
 
 import ffmpeg
@@ -8,6 +11,59 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
 
 console = Console()
+
+
+def _start_ffmpeg_process(full_command):
+    if sys.platform == "win32":
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        return subprocess.Popen(
+            full_command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            encoding="utf-8",
+            creationflags=creationflags,
+        )
+
+    return subprocess.Popen(
+        full_command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
+        encoding="utf-8",
+        preexec_fn=os.setsid,
+    )
+
+
+def _terminate_ffmpeg_process(process) -> None:
+    if process.poll() is not None:
+        return
+
+    try:
+        if sys.platform == "win32":
+            ctrl_break = getattr(signal, "CTRL_BREAK_EVENT", None)
+            if ctrl_break is not None:
+                try:
+                    process.send_signal(ctrl_break)
+                except Exception:
+                    process.terminate()
+            else:
+                process.terminate()
+        else:
+            os.killpg(process.pid, signal.SIGINT)
+
+        process.wait(timeout=2)
+        return
+    except Exception:
+        pass
+
+    try:
+        if sys.platform == "win32":
+            process.kill()
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
+    except Exception:
+        pass
 
 
 def check_ffmpeg_ffprobe():
@@ -48,17 +104,22 @@ def run_command(stream_spec, description="Processing...", show_progress=False):
     logging.info(f"Executing command: {' '.join(full_command)}")
 
     if not show_progress:
+        process = _start_ffmpeg_process(full_command)
         try:
-            # Use ffmpeg.run() for simple, non-progress tasks. It's cleaner.
-            out, err = ffmpeg.run(stream_spec, capture_stdout=True, capture_stderr=True, quiet=True)
-            logging.info("Command successful (no progress bar).")
-            return out.decode('utf-8')
-        except ffmpeg.Error as e:
-            error_message = e.stderr.decode('utf-8')
+            stdout, stderr = process.communicate()
+        except KeyboardInterrupt:
+            _terminate_ffmpeg_process(process)
+            raise
+
+        if process.returncode != 0:
             console.print("[bold red]An error occurred:[/bold red]")
-            console.print(error_message)
-            logging.error(f"ffmpeg error:{error_message}")
+            if stderr:
+                console.print(stderr)
+                logging.error(f"ffmpeg error:{stderr}")
             return None
+
+        logging.info("Command successful (no progress bar).")
+        return stdout or ""
     else:
         # For the progress bar, we must run ffmpeg as a subprocess and parse stderr.
         duration = 0
@@ -91,26 +152,29 @@ def run_command(stream_spec, description="Processing...", show_progress=False):
             task = progress.add_task(description, total=100)
             
             # Run the command as a subprocess to capture stderr in real-time
-            process = subprocess.Popen(
-                full_command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                universal_newlines=True,
-                encoding='utf-8'
-            )
-
-            for line in process.stderr:
-                logging.debug(f"ffmpeg stderr: {line.strip()}")
-                if "time=" in line and duration > 0:
-                    try:
-                        time_str = line.split("time=")[1].split(" ")[0].strip()
-                        h, m, s_parts = time_str.split(':')
-                        s = float(s_parts)
-                        elapsed_time = int(h) * 3600 + int(m) * 60 + s
-                        percent_complete = (elapsed_time / duration) * 100
-                        progress.update(task, completed=min(percent_complete, 100))
-                    except Exception:
-                        pass # Ignore any parsing errors
+            process = _start_ffmpeg_process(full_command)
+            try:
+                for line in process.stderr:
+                    logging.debug(f"ffmpeg stderr: {line.strip()}")
+                    if "time=" in line and duration > 0:
+                        try:
+                            time_str = line.split("time=")[1].split(" ")[0].strip()
+                            h, m, s_parts = time_str.split(":")
+                            s = float(s_parts)
+                            elapsed_time = int(h) * 3600 + int(m) * 60 + s
+                            percent_complete = (elapsed_time / duration) * 100
+                            progress.update(task, completed=min(percent_complete, 100))
+                        except Exception:
+                            pass  # Ignore any parsing errors
+            except KeyboardInterrupt:
+                _terminate_ffmpeg_process(process)
+                raise
+            finally:
+                try:
+                    if process.stderr is not None:
+                        process.stderr.close()
+                except Exception:
+                    pass
 
             process.wait()
             progress.update(task, completed=100)
