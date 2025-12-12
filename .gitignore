@@ -47,3 +47,5 @@ Thumbs.db
 *posts.md
 *.bat
 poster
+
+/venv/
