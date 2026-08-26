@@ -84,6 +84,18 @@ jobs:
           " "$VERSION"
           echo "npm version: $VERSION"
 
+      # npmjs.com renders the README from the published tarball, not from
+      # GitHub. Stage the repo README (and LICENSE) into the package, with
+      # relative links rewritten to absolute GitHub URLs.
+      - name: Stage README and LICENSE
+        if: steps.auth.outputs.mode != 'none'
+        run: |
+          sed -e 's|](CONTRIBUTING.md)|](https://github.com/fsx8/ffwiz/blob/main/CONTRIBUTING.md)|' \
+              -e 's|](LICENSE)|](https://github.com/fsx8/ffwiz/blob/main/LICENSE)|' \
+              README.md > npm/README.md
+          cp LICENSE npm/LICENSE
+          head -5 npm/README.md
+
       - name: Test install script locally (linux x64)
         if: steps.auth.outputs.mode != 'none'
         env:
