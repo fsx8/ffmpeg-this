@@ -4,8 +4,30 @@
     <a href="https://github.com/fsx8/ffwiz/releases">
         <img src="https://img.shields.io/github/v/release/fsx8/ffwiz?label=release" alt="GitHub Release">
     </a>
+    <a href="https://www.npmjs.com/package/ffwiz">
+        <img src="https://img.shields.io/npm/v/ffwiz?label=npm&color=cb3837" alt="npm version">
+    </a>
+    <a href="https://pkg.go.dev/github.com/fsx8/ffwiz">
+        <img src="https://pkg.go.dev/badge/github.com/fsx8/ffwiz.svg" alt="Go Reference">
+    </a>
+    <a href="https://github.com/fsx8/ffwiz/actions/workflows/tests.yml">
+        <img src="https://github.com/fsx8/ffwiz/actions/workflows/tests.yml/badge.svg" alt="Tests">
+    </a>
     <a href="https://github.com/fsx8/ffwiz/blob/main/LICENSE">
         <img src="https://img.shields.io/github/license/fsx8/ffwiz" alt="License">
+    </a>
+    <br>
+    <a href="https://github.com/fsx8/ffwiz#2-debianubuntu--apt-repository-recommended-for-servers">
+        <img src="https://img.shields.io/badge/apt-repository-0067a5?logo=debian&logoColor=white" alt="apt repository">
+    </a>
+    <a href="https://github.com/fsx8/homebrew-tap">
+        <img src="https://img.shields.io/badge/homebrew-fsx8%2Ftap%2Fffwiz-orange?logo=homebrew&logoColor=white" alt="Homebrew tap">
+    </a>
+    <a href="https://github.com/fsx8/ffwiz/pkgs/container/ffwiz">
+        <img src="https://img.shields.io/badge/docker-ghcr.io%2Ffsx8%2Fffwiz-2496ed?logo=docker&logoColor=white" alt="Docker image">
+    </a>
+    <a href="https://fsx8.github.io/ffwiz/">
+        <img src="https://img.shields.io/badge/go-install-00ADD8?logo=go&logoColor=white" alt="go install">
     </a>
 </p>
 
