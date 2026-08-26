@@ -1,0 +1,96 @@
+version: 2
+
+project_name: ffwiz
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: ffwiz
+    main: ./cmd/ffwiz
+    binary: ffwiz
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: ffwiz
+    name_template: >-
+      {{ .ProjectName }}_{{- .Os }}_{{- .Arch }}
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+nfpms:
+  - package_name: ffwiz
+    file_name_template: "{{ .ConventionalFileName }}"
+    vendor: fsx8
+    homepage: https://github.com/fsx8/ffwiz
+    maintainer: fsx8 <fsx8@users.noreply.github.com>
+    description: |-
+      A powerful and intuitive command-line video editor, built on FFmpeg.
+      Requires ffmpeg (with ffprobe) to be installed separately.
+    license: MIT
+    formats:
+      - deb
+      - rpm
+
+homebrew_casks:
+  - name: ffwiz
+    binaries:
+      - ffwiz
+    caveats: "Requires ffmpeg (with ffprobe) in PATH: brew install ffmpeg"
+    homepage: https://github.com/fsx8/ffwiz
+    description: A powerful and intuitive command-line video editor, built on FFmpeg.
+    hooks:
+      post:
+        # Binary is unsigned: clear the quarantine bit so macOS lets it run.
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/ffwiz"]
+          end
+    repository:
+      owner: fsx8
+      name: homebrew-tap
+      # A PAT with repo scope, separate from the release GITHUB_TOKEN.
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+
+dockers_v2:
+  - id: ffwiz
+    images:
+      - ghcr.io/fsx8/ffwiz
+    tags:
+      - "v{{ .Version }}"
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    labels:
+      "org.opencontainers.image.title": "ffwiz"
+      "org.opencontainers.image.description": "A powerful and intuitive command-line video editor, built on FFmpeg."
+      "org.opencontainers.image.source": "https://github.com/fsx8/ffwiz"
+      "org.opencontainers.image.licenses": "MIT"
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"

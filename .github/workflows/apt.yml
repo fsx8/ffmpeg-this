@@ -1,0 +1,195 @@
+name: Publish APT repository
+
+on:
+  # NOTE: releases published by goreleaser use GITHUB_TOKEN, and events caused
+  # by GITHUB_TOKEN do not trigger workflows. The workflow_run trigger below
+  # covers that case; this one covers manually published releases.
+  release:
+    types: [published]
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v1.2.3). Defaults to latest release."
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # Only run for the main repo's releases; skip on forks with no signing key.
+    # For workflow_run: only act on successful runs of tag pushes (tag = head_branch).
+    if: >-
+      github.repository == 'fsx8/ffwiz' &&
+      (github.event_name != 'workflow_run' ||
+        (github.event.workflow_run.conclusion == 'success' &&
+         startsWith(github.event.workflow_run.head_branch, 'v')))
+    steps:
+      - name: Check out default branch
+        uses: actions/checkout@v5
+
+      - name: Resolve release tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "release" ]; then
+            echo "value=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "workflow_run" ]; then
+            echo "value=${{ github.event.workflow_run.head_branch }}" >> "$GITHUB_OUTPUT"
+          else
+            TAG=$(gh release view --json tagName --jq .tagName)
+            echo "value=$TAG" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Publishing APT repo for $(cat "$GITHUB_OUTPUT" | grep value | cut -d= -f2-)"
+
+      - name: Check that GPG secrets are configured
+        run: |
+          if [ -z "${{ secrets.APT_GPG_PRIVATE_KEY }}" ]; then
+            echo "::error::Missing secret APT_GPG_PRIVATE_KEY. See README for setup."
+            exit 1
+          fi
+
+      - name: Install tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq dpkg-dev gnupg
+
+      - name: Import GPG key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          # Trust the key ultimately so apt-ftparchive / gpg signing works non-interactively.
+          KEYID=$(gpg --list-secret-keys --with-colons --fingerprint | awk -F: '/^fpr:/{print $10; exit}')
+          echo "$KEYID:6:" | gpg --import-ownertrust
+          gpg --list-secret-keys
+          # Export the public key that clients will install.
+          gpg --armor --export "$KEYID" > KEY.gpg
+          echo "KEYID=$KEYID" >> "$GITHUB_ENV"
+
+      - name: Download .deb artifacts from the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/debs
+          gh release download "${{ steps.tag.outputs.value }}" --pattern "*.deb" --dir /tmp/debs
+          ls -lh /tmp/debs
+
+      - name: Check out gh-pages (apt repo)
+        uses: actions/checkout@v5
+        with:
+          ref: gh-pages
+          path: gh-pages
+        continue-on-error: true
+
+      - name: Initialize gh-pages branch if it does not exist
+        run: |
+          if [ ! -d gh-pages/.git ]; then
+            mkdir -p gh-pages
+            git -C gh-pages init -b gh-pages
+            git -C gh-pages config user.name "github-actions[bot]"
+            git -C gh-pages config user.email "github-actions[bot]@users.noreply.github.com"
+          else
+            git -C gh-pages config user.name "github-actions[bot]"
+            git -C gh-pages config user.email "github-actions[bot]@users.noreply.github.com"
+          fi
+          mkdir -p gh-pages/apt/pool/main/f/ffwiz
+          mkdir -p gh-pages/apt/dists/stable/main/binary-amd64
+          mkdir -p gh-pages/apt/dists/stable/main/binary-arm64
+
+      - name: Add new .debs to the pool
+        run: |
+          cp /tmp/debs/*.deb gh-pages/apt/pool/main/f/ffwiz/ 2>/dev/null || true
+          # De-duplicate by filename (keep the last downloaded version on overwrite).
+          ls -lh gh-pages/apt/pool/main/f/ffwiz/
+
+      - name: Generate Packages and Release files
+        run: |
+          set -e
+          cd gh-pages/apt
+          # Packages per arch
+          dpkg-scanpackages --multiversion pool /dev/null > dists/stable/main/binary-amd64/Packages
+          gzip -k -f dists/stable/main/binary-amd64/Packages
+          # arm64 Packages: same pool, filtered by Architecture field is optional —
+          # dpkg-scanpackages lists all arches; apt handles it. Duplicate for both.
+          cp dists/stable/main/binary-amd64/Packages dists/stable/main/binary-arm64/Packages
+          cp dists/stable/main/binary-amd64/Packages.gz dists/stable/main/binary-arm64/Packages.gz
+
+          # Release file (apt-ftparchive). Minimal config inline.
+          cat > /tmp/apt-release.conf <<'CONF'
+          APT::FTPArchive::Release::Origin "fsx8";
+          APT::FTPArchive::Release::Label "ffwiz";
+          APT::FTPArchive::Release::Suite "stable";
+          APT::FTPArchive::Release::Codename "stable";
+          APT::FTPArchive::Release::Architectures "amd64 arm64";
+          APT::FTPArchive::Release::Components "main";
+          APT::FTPArchive::Release::Description "ffwiz — ffmpeg wizard (https://github.com/fsx8/ffwiz)";
+          CONF
+          apt-ftparchive -c /tmp/apt-release.conf release dists/stable > dists/stable/Release
+          cat dists/stable/Release
+
+      - name: Sign the Release
+        env:
+          GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: |
+          cd gh-pages/apt
+          # InRelease = clearsigned Release; Release.gpg = detached signature.
+          if [ -n "$GPG_PASSPHRASE" ]; then
+            gpg --batch --yes --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" --clearsign -o dists/stable/InRelease dists/stable/Release
+            gpg --batch --yes --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" -abs -o dists/stable/Release.gpg dists/stable/Release
+          else
+            gpg --batch --yes --pinentry-mode loopback --clearsign -o dists/stable/InRelease dists/stable/Release
+            gpg --batch --yes --pinentry-mode loopback -abs -o dists/stable/Release.gpg dists/stable/Release
+          fi
+          # Publish the public key alongside the repo for client setup instructions.
+          cp "$GITHUB_WORKSPACE/KEY.gpg" "$GITHUB_WORKSPACE/gh-pages/KEY.gpg"
+          cp "$GITHUB_WORKSPACE/KEY.gpg" "$GITHUB_WORKSPACE/gh-pages/apt/KEY.gpg"
+          # Binary (dearmored) keyring for install.sh — installs without gpg on the client.
+          gpg --dearmor < "$GITHUB_WORKSPACE/KEY.gpg" > "$GITHUB_WORKSPACE/gh-pages/ffwiz-archive-keyring.gpg"
+          # Keep the one-line installer script in sync with the repo.
+          if [ -f "$GITHUB_WORKSPACE/scripts/install.sh" ]; then
+            cp "$GITHUB_WORKSPACE/scripts/install.sh" "$GITHUB_WORKSPACE/gh-pages/install.sh"
+          fi
+
+      - name: Publish to gh-pages
+        run: |
+          cd gh-pages
+          # Keep a top-level README for the Pages site.
+          if [ ! -f README.md ]; then
+            cat > README.md <<'MD'
+          # ffwiz APT repository
+
+          This branch is auto-published by `.github/workflows/apt.yml` on every
+          GitHub Release. Do not edit by hand.
+
+          ## Client setup
+
+          ```bash
+          curl -fsSL https://fsx8.github.io/ffwiz/KEY.gpg | sudo gpg --dearmor -o /usr/share/keyrings/ffwiz-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/ffwiz-archive-keyring.gpg] https://fsx8.github.io/ffwiz/apt stable main" | sudo tee /etc/apt/sources.list.d/ffwiz.list
+          sudo apt update && sudo apt install ffwiz
+          ```
+          MD
+          fi
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No APT repo changes to publish."
+            exit 0
+          fi
+          git commit -m "apt: publish ${{ steps.tag.outputs.value }}"
+          # Push to the gh-pages branch. The checkout above already tracks origin/gh-pages
+          # when it existed; for a fresh orphan we need to set the remote explicitly.
+          if git remote get-url origin >/dev/null 2>&1; then
+            git push origin HEAD:gh-pages
+          else
+            git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+            git push -u origin gh-pages
+          fi

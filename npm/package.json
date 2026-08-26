@@ -1,0 +1,33 @@
+{
+  "name": "ffwiz",
+  "version": "0.0.0",
+  "description": "A powerful and intuitive command-line video editor, built on FFmpeg.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fsx8/ffwiz.git"
+  },
+  "homepage": "https://github.com/fsx8/ffwiz",
+  "bin": {
+    "ffwiz": "./run.js"
+  },
+  "files": [
+    "install.js",
+    "run.js"
+  ],
+  "scripts": {
+    "install": "node install.js"
+  },
+  "engines": {
+    "node": ">=14"
+  },
+  "keywords": [
+    "ffmpeg",
+    "video",
+    "audio",
+    "cli",
+    "tui",
+    "editor",
+    "converter"
+  ]
+}

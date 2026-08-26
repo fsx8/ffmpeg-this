@@ -1,0 +1,48 @@
+# Build artifacts
+/dist/
+/build/
+
+# Go build/test outputs
+*.exe
+*.test
+*.out
+/ffwiz
+
+# Media Files (Video)
+*.mkv
+*.mp4
+*.avi
+*.mov
+*.webm
+*.flv
+*.wmv
+*.mpeg
+*.mpg
+*.m4v
+*.ts
+*.vob
+
+# Media Files (Audio)
+*.mp3
+*.flac
+*.wav
+*.ogg
+*.aac
+*.wma
+*.m4a
+*.opus
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+#other common files
+*.log
+*.bak
+*.tmp
+*.swp
+*.pid
+
+*posts.md
+*.bat
+poster

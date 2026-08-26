@@ -1,0 +1,126 @@
+name: Publish npm package
+
+# Publishes the ffwiz npm wrapper (downloads the platform binary from the
+# matching GitHub Release on install).
+#
+# Auth strategy:
+#   - If the NPM_TOKEN secret is set: classic token publish (bootstrap path).
+#   - Else, if https://npmjs.com/package/ffwiz exists: npm trusted publishing
+#     (OIDC) — no tokens, configured once in the package settings on npmjs.com
+#     (GitHub Actions / fsx8 / ffwiz / workflow: npm.yml / allow: npm publish).
+#   - Else: skip with setup instructions (first publish needs a token or a
+#     one-time manual publish; trusted publishers can only be registered for
+#     existing packages).
+#
+# Run manually: gh workflow run npm.yml -f tag=v0.1.1
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v0.1.1)"
+        required: true
+
+permissions:
+  contents: read
+  id-token: write # required for npm trusted publishing (OIDC)
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    if: github.repository == 'fsx8/ffwiz'
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          # Node 24 ships npm >= 11.5.1, required for OIDC trusted publishing.
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+
+      - name: Determine auth mode
+        id: auth
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -n "$NPM_TOKEN" ]; then
+            echo "mode=token" >> "$GITHUB_OUTPUT"
+            echo "auth: NPM_TOKEN secret"
+          else
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" https://registry.npmjs.org/ffwiz)
+            if [ "$CODE" = "200" ]; then
+              echo "mode=oidc" >> "$GITHUB_OUTPUT"
+              echo "auth: OIDC trusted publishing"
+            else
+              echo "mode=none" >> "$GITHUB_OUTPUT"
+              echo "auth: none available"
+            fi
+          fi
+
+      - name: Verify release assets exist
+        if: steps.auth.outputs.mode != 'none'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ inputs.tag }}"
+          gh release view "$TAG" --repo fsx8/ffwiz --json assets --jq '.assets[].name' | tee /tmp/assets.txt
+          for a in ffwiz_linux_amd64.tar.gz ffwiz_linux_arm64.tar.gz \
+                   ffwiz_darwin_amd64.tar.gz ffwiz_darwin_arm64.tar.gz \
+                   ffwiz_windows_amd64.zip ffwiz_windows_arm64.zip; do
+            grep -qx "$a" /tmp/assets.txt || { echo "::error::missing asset $a in $TAG"; exit 1; }
+          done
+
+      - name: Set version from tag
+        if: steps.auth.outputs.mode != 'none'
+        run: |
+          VERSION="${{ inputs.tag }}"
+          VERSION="${VERSION#v}"
+          node -e "
+            const fs = require('fs');
+            const p = JSON.parse(fs.readFileSync('npm/package.json'));
+            p.version = process.argv[1];
+            fs.writeFileSync('npm/package.json', JSON.stringify(p, null, 2) + '\n');
+          " "$VERSION"
+          echo "npm version: $VERSION"
+
+      - name: Test install script locally (linux x64)
+        if: steps.auth.outputs.mode != 'none'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd npm
+          TAG="${{ inputs.tag }}"
+          mkdir -p bin
+          gh release download "$TAG" --repo fsx8/ffwiz --pattern "ffwiz_linux_amd64.tar.gz" --dir /tmp
+          tar -xzf /tmp/ffwiz_linux_amd64.tar.gz -C bin
+          [ -x bin/ffwiz ] && ./bin/ffwiz -version
+
+      - name: Publish to npm (token bootstrap)
+        if: steps.auth.outputs.mode == 'token'
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          cd npm
+          echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > .npmrc
+          npm publish --access public
+          rm -f .npmrc
+
+      # No NODE_AUTH_TOKEN here — must be unset (not empty) for OIDC to engage.
+      - name: Publish to npm (OIDC trusted publishing)
+        if: steps.auth.outputs.mode == 'oidc'
+        run: |
+          cd npm
+          unset NODE_AUTH_TOKEN
+          npm publish --access public
+
+      - name: Skipped (setup required)
+        if: steps.auth.outputs.mode == 'none'
+        run: |
+          echo "::notice::npm publish skipped: no NPM_TOKEN secret, and ffwiz does not exist on npm yet."
+          echo "::notice::Bootstrap ONCE (pick one):"
+          echo "::notice::  a) gh secret set NPM_TOKEN --repo fsx8/ffwiz  (any publish token), re-run, then DELETE the secret afterwards"
+          echo "::notice::  b) manual: cd npm && npm version <tag w/o v> --no-git-tag-version && npm publish --access public"
+          echo "::notice::Then register the trusted publisher (npmjs.com -> ffwiz -> Settings -> Trusted Publisher):"
+          echo "::notice::  GitHub Actions | user: fsx8 | repo: ffwiz | workflow filename: npm.yml | allowed: npm publish"
+          echo "::notice::After that this workflow publishes with zero tokens (OIDC)."
