@@ -22,6 +22,12 @@
 *.ts
 *.vob
 
+# Generated test/demo fixtures (scripts/testmedia.sh)
+/testmedia/
+
+# Runtime session log written by ffwiz
+/ffmpeg_log.txt
+
 # Media Files (Audio)
 *.mp3
 *.flac

@@ -27,7 +27,10 @@ func (c Cmd) String() string {
 
 type Runner interface {
 	Run(ctx context.Context, cmd Cmd) (stdout string, stderr string, err error)
-	RunStreaming(ctx context.Context, cmd Cmd, onStderr func(line string)) (exitCode int, err error)
+	// RunStreaming delivers split lines from the child's stderr (and stdout,
+	// when onStdout is set; nil means drain-and-discard). Either callback may
+	// be nil.
+	RunStreaming(ctx context.Context, cmd Cmd, onStdout, onStderr func(line string)) (exitCode int, err error)
 }
 
 type runner struct{}
@@ -44,7 +47,7 @@ func (runner) Run(ctx context.Context, cmd Cmd) (string, string, error) {
 	return outBuf.String(), errBuf.String(), err
 }
 
-func (runner) RunStreaming(ctx context.Context, cmd Cmd, onStderr func(line string)) (int, error) {
+func (runner) RunStreaming(ctx context.Context, cmd Cmd, onStdout, onStderr func(line string)) (int, error) {
 	c := exec.CommandContext(ctx, cmd.Name, cmd.Args...)
 	setProcessGroup(c)
 	stdout, err := c.StdoutPipe()
@@ -64,31 +67,11 @@ func (runner) RunStreaming(ctx context.Context, cmd Cmd, onStderr func(line stri
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(io.Discard, stdout)
+		scanLines(stdout, onStdout)
 	}()
 	go func() {
 		defer wg.Done()
-		buf := make([]byte, 4096)
-		var lineBuf bytes.Buffer
-		for {
-			n, readErr := stderr.Read(buf)
-			if n > 0 {
-				for _, ch := range buf[:n] {
-					if ch == '\n' {
-						onStderr(lineBuf.String())
-						lineBuf.Reset()
-						continue
-					}
-					_ = lineBuf.WriteByte(ch)
-				}
-			}
-			if readErr != nil {
-				if lineBuf.Len() > 0 {
-					onStderr(lineBuf.String())
-				}
-				break
-			}
-		}
+		scanLines(stderr, onStderr)
 	}()
 
 	// Drain both pipes before calling Wait: Wait closes them, and reads
@@ -104,4 +87,32 @@ func (runner) RunStreaming(ctx context.Context, cmd Cmd, onStderr func(line stri
 		return 0, waitErr
 	}
 	return 0, nil
+}
+
+func scanLines(r io.Reader, cb func(line string)) {
+	if cb == nil {
+		_, _ = io.Copy(io.Discard, r)
+		return
+	}
+	buf := make([]byte, 4096)
+	var lineBuf bytes.Buffer
+	for {
+		n, readErr := r.Read(buf)
+		if n > 0 {
+			for _, ch := range buf[:n] {
+				if ch == '\n' {
+					cb(lineBuf.String())
+					lineBuf.Reset()
+					continue
+				}
+				_ = lineBuf.WriteByte(ch)
+			}
+		}
+		if readErr != nil {
+			if lineBuf.Len() > 0 {
+				cb(lineBuf.String())
+			}
+			break
+		}
+	}
 }

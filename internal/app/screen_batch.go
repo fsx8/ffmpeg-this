@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -149,6 +150,15 @@ type batchStatusMsg struct {
 	cancelled bool
 }
 
+type batchProgMsg struct {
+	name  string
+	idx   int
+	total int
+	stage string
+	pct   float64
+	speed float64
+}
+
 type batchRunModel struct {
 	cfg     Config
 	dir     string
@@ -169,6 +179,15 @@ type batchRunModel struct {
 	err       string
 	cancelled bool
 
+	progCh     chan batchProgMsg
+	width      int
+	curName    string
+	curStage   string
+	curPct     float64
+	curSpeed   float64
+	curIdx     int
+	totalFiles int
+
 	style lipgloss.Style
 }
 
@@ -185,16 +204,29 @@ func newBatchRun(cfg Config, dir, format string, quality ffx.BatchVideoQuality) 
 		cancel:  cancel,
 		spin:    sp,
 		running: true,
+		progCh:  make(chan batchProgMsg, 64),
 		style:   lipgloss.NewStyle().Padding(1, 2),
 	}
 }
 
 func (m *batchRunModel) Init() tea.Cmd {
-	return tea.Batch(m.spin.Tick, m.runBatchCmd())
+	return tea.Batch(m.spin.Tick, pollBatchProgress(m.progCh), m.runBatchCmd())
+}
+
+func pollBatchProgress(ch <-chan batchProgMsg) tea.Cmd {
+	return func() tea.Msg {
+		p, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return p
+	}
 }
 
 func (m *batchRunModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q":
@@ -229,7 +261,22 @@ func (m *batchRunModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.spin, cmd = m.spin.Update(msg)
 			return m, cmd
 		}
+	case batchProgMsg:
+		if msg.name != "" {
+			m.curName = msg.name
+		}
+		m.curStage = msg.stage
+		m.curPct = msg.pct
+		m.curSpeed = msg.speed
+		if msg.total > 0 {
+			m.totalFiles = msg.total
+		}
+		if msg.idx > 0 {
+			m.curIdx = msg.idx
+		}
+		return m, pollBatchProgress(m.progCh)
 	case batchStatusMsg:
+		close(m.progCh)
 		m.running = false
 		m.ok = msg.ok
 		m.fail = msg.fail
@@ -256,8 +303,30 @@ func (m *batchRunModel) View() string {
 	default:
 		header += lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Render("Done.\n")
 	}
+
+	body := ""
+	if m.running && m.totalFiles > 0 {
+		dim := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+		fileLine := fmt.Sprintf("File %d/%d: %s", m.curIdx, m.totalFiles, m.curName)
+		body += "\n" + fileLine + "\n"
+		switch {
+		case m.curName == "":
+			body += dim.Render("starting…") + "\n"
+		case m.curStage != "":
+			body += m.spin.View() + " " + m.curStage + "…\n"
+		case m.curPct > 0:
+			bar := lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Render(
+				renderBar(progressWidth(m.width-8), m.curPct))
+			line := fmt.Sprintf("%3.0f%%", m.curPct*100)
+			if m.curSpeed > 0 {
+				line += fmt.Sprintf("  %.1fx", m.curSpeed)
+			}
+			body += bar + dim.Render(line) + "\n"
+		}
+	}
+
 	stats := lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(
-		fmt.Sprintf("OK: %d  Failed: %d  Skipped: %d", m.ok, m.fail, m.skipped),
+		fmt.Sprintf("\nOK: %d  Failed: %d  Skipped: %d", m.ok, m.fail, m.skipped),
 	)
 	last := ""
 	if m.last != "" {
@@ -268,7 +337,7 @@ func (m *batchRunModel) View() string {
 		errLine = "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render("Error:\n"+m.err)
 	}
 	footer := "\n\nEsc/Enter to go back"
-	return m.style.Render(header + stats + last + errLine + footer)
+	return m.style.Render(header + body + stats + last + errLine + footer)
 }
 
 func (m *batchRunModel) logf(format string, args ...any) {
@@ -290,11 +359,22 @@ func (m *batchRunModel) runBatchCmd() tea.Cmd {
 		if err != nil {
 			return batchStatusMsg{err: err}
 		}
+		sendProg := func(p batchProgMsg) {
+			select {
+			case m.progCh <- p:
+			default:
+			}
+		}
+
 		okCount, failCount, skippedCount := 0, 0, 0
 		last := ""
 		cancelled := false
+		total := len(files)
+		if total > 0 {
+			sendProg(batchProgMsg{name: "", idx: 0, total: total})
+		}
 
-		for _, f := range files {
+		for i, f := range files {
 			if m.ctx.Err() != nil {
 				cancelled = true
 				last = "cancelled"
@@ -302,11 +382,11 @@ func (m *batchRunModel) runBatchCmd() tea.Cmd {
 			}
 			inPath := filepath.Join(dir, f)
 
-			res, err := cfg.Prober.Probe(m.ctx, inPath)
-			if err != nil {
+			res, perr := cfg.Prober.Probe(m.ctx, inPath)
+			if perr != nil {
 				failCount++
 				last = "probe failed " + f
-				m.logf("batch: probe failed for %s: %v", inPath, err)
+				m.logf("batch: probe failed for %s: %v", inPath, perr)
 				continue
 			}
 			hasAudio, hasVideo := false, false
@@ -334,19 +414,51 @@ func (m *batchRunModel) runBatchCmd() tea.Cmd {
 			outName := ffx.BatchOutputName(inPath, format)
 			outPath := filepath.Join(dir, outName)
 
+			fileDur := time.Duration(0)
+			if d, ok := parseProbeSeconds(res.Format.Duration); ok {
+				fileDur = d
+			}
+
+			stderrLog := func(line string) {
+				if line != "" && m.cfg.Logger != nil {
+					m.cfg.Logger.Printf("%s", line)
+				}
+			}
+			newTracker := func() (*ffx.ProgressTracker, func(line string)) {
+				tr := &ffx.ProgressTracker{}
+				return tr, func(line string) {
+					if s, ok := tr.Observe(line); ok {
+						sendProg(batchProgMsg{name: f, idx: i + 1, pct: s.Percent(fileDur), speed: s.Speed})
+					}
+				}
+			}
+
 			if format == "gif" {
 				palette := filepath.Join(dir, "palette_"+strings.TrimSuffix(f, filepath.Ext(f))+".png")
+				sendProg(batchProgMsg{name: f, idx: i + 1, stage: "palette"})
 				if _, stderr, err := cfg.Runner.Run(m.ctx, execx.Cmd{Name: "ffmpeg", Args: ffx.BuildGifPaletteCmd(inPath, palette).Args}); err != nil {
 					failCount++
 					last = "failed palette for " + f
 					m.logf("batch: palette generation failed for %s: %v\n%s", inPath, err, stderr)
+					if m.ctx.Err() != nil {
+						cancelled = true
+						last = "cancelled"
+						break
+					}
 					continue
 				}
-				if _, stderr, err := cfg.Runner.Run(m.ctx, execx.Cmd{Name: "ffmpeg", Args: ffx.BuildGifFromPaletteCmd(inPath, palette, outPath).Args}); err != nil {
+				_, onProg := newTracker()
+				args := ffx.AddProgressArgs(ffx.BuildGifFromPaletteCmd(inPath, palette, outPath).Args)
+				if _, err := cfg.Runner.RunStreaming(m.ctx, execx.Cmd{Name: "ffmpeg", Args: args}, onProg, stderrLog); err != nil {
 					failCount++
 					last = "failed gif for " + f
 					_ = os.Remove(palette)
-					m.logf("batch: gif conversion failed for %s: %v\n%s", inPath, err, stderr)
+					m.logf("batch: gif conversion failed for %s: %v\n%s", inPath, err, "")
+					if m.ctx.Err() != nil {
+						cancelled = true
+						last = "cancelled"
+						break
+					}
 					continue
 				}
 				_ = os.Remove(palette)
@@ -356,10 +468,12 @@ func (m *batchRunModel) runBatchCmd() tea.Cmd {
 			}
 
 			cmd := ffx.BuildBatchConvertCmd(inPath, outPath, format, quality, hasAudio)
-			if _, stderr, err := cfg.Runner.Run(m.ctx, execx.Cmd{Name: "ffmpeg", Args: cmd.Args}); err != nil {
+			_, onProg := newTracker()
+			args := ffx.AddProgressArgs(cmd.Args)
+			if _, err := cfg.Runner.RunStreaming(m.ctx, execx.Cmd{Name: "ffmpeg", Args: args}, onProg, stderrLog); err != nil {
 				failCount++
 				last = "failed " + f
-				m.logf("batch: conversion failed for %s: %v\n%s", inPath, err, stderr)
+				m.logf("batch: conversion failed for %s: %v", inPath, err)
 				if m.ctx.Err() != nil {
 					cancelled = true
 					last = "cancelled"

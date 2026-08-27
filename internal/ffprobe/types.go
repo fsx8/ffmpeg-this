@@ -33,6 +33,10 @@ type Stream struct {
 	SampleAspectRatio string            `json:"sample_aspect_ratio"`
 	Profile           string            `json:"profile"`
 	Level             int               `json:"level"`
+	PixFmt            string            `json:"pix_fmt"`
+	ColorTransfer     string            `json:"color_transfer"`
+	ColorPrimaries    string            `json:"color_primaries"`
+	ColorSpace        string            `json:"color_space"`
 	Disposition       map[string]any    `json:"disposition"`
 	Tags              map[string]string `json:"tags"`
 }

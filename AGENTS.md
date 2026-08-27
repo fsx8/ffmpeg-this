@@ -12,6 +12,7 @@
 - **Extract Audio**: Rip audio tracks to mp3/flac/wav
 - **Interactive Conversion**: Granular per-track control (keep/remove/convert with codec selection)
 - **Batch Conversion**: Convert a whole directory with quality presets (incl. 2-step GIF palette)
+- **Live Progress Bar**: ffmpeg runs with `-nostats -progress pipe:1`; stdout lines are parsed (`internal/ffmpeg/progress.go`) against ffprobe-derived total duration and rendered as a percent bar with ETA
 
 ### Architecture
 
@@ -19,7 +20,7 @@
 - `internal/app/`: Bubble Tea screens and navigation (stack-based: menus + wizards + exec view)
 - `internal/ffmpeg/`: Deterministic FFmpeg argument generation (one file per feature, no subprocesses here)
 - `internal/ffprobe/`: ffprobe JSON parsing and probing
-- `internal/execx/`: Process execution (buffered + streaming stderr, context-aware cancellation)
+- `internal/execx/`: Process execution (buffered + streaming stdout/stderr with per-line callbacks, context-aware cancellation)
 - `internal/media/`: Media file discovery helpers
 
 ### Technologies
@@ -65,11 +66,16 @@ go run ./cmd/ffwiz            # or: go build ./cmd/ffwiz
 
 - Errors are logged to `ffmpeg_log.txt` in the working directory
 - Ctrl+C cancels in-flight ffmpeg; screens show streamed stderr in a viewport
+- Progress flags are added at execution sites via `ffmpeg.AddProgressArgs`, never inside the deterministic generators themselves
 
 ### Testing
 
+Two-tier contract: unit tests assert on generated arguments and model state without executing anything; integration tests run real ffmpeg, then ffprobe the written output files and assert stream layout (codecs, counts, channels, durations, pix_fmt, tags) — a feature claim is only trusted when proven by the integration tier.
+
 - `go test ./...` — deterministic command/argument generation tests; no FFmpeg execution
-- CI: `.github/workflows/tests.yml` on every push/PR
+- `go test -tags=integration ./...` — end-to-end tests that run real ffmpeg/ffprobe through every feature (trim, join, track editing, batch/GIF, progress parsing) plus a remux scenario matrix over `hdr4k.mkv` (remove/convert audio, keep/remove subtitles, metadata/tag preservation, mkv→mp4/webm container adaptation); they self-skip when tools or fixtures are missing
+- `scripts/testmedia.sh` — regenerates the deterministic fixture set into `testmedia/` (gitignored; lavfi sources, ~25s to build). Includes `hdr4k.mkv`: 4K HEVC 10-bit HDR10 with DTS 5.1 + EAC3 5.1 + AAC and 4 subtitle tracks. Note: ffmpeg can only ENCODE DTS core (`-strict -2`, experimental encoder) — DTS-HD MA is decode-only upstream; a true HD-MA sample would have to be supplied manually
+- CI: `.github/workflows/tests.yml` runs both tiers on every push/PR (installs ffmpeg + generates fixtures)
 - Before handing back work: `gofmt -l .`, `go vet ./...`, `go build ./...`, `go test ./...`
 
 ## Release & Distribution
@@ -103,5 +109,5 @@ Version injection: goreleaser sets `main.version` via ldflags; `go install` buil
 
 1. FFmpeg must be installed separately on the user's system (except in the Docker image, which bundles it)
 2. The app creates `ffmpeg_log.txt` in the working directory each session
-3. Trim uses output-side seeking deliberately — do not move `-ss`/`-to` before `-i` (breaks ffmpeg 4.x, e.g. Ubuntu 22.04)
+3. Trim uses output-side seeking deliberately — do not move `-ss`/`-to` before `-i` (breaks ffmpeg 4.x, e.g. Ubuntu 22.04). Because `-c copy` can only start a video at a keyframe, the trim wizard probes keyframes (`ffprobe -skip_frame nokey`, `ffprobe.Prober.Keyframes`) and snaps the requested start to the previous keyframe (`ffmpeg.SnapToKeyframe`, ~50 ms tolerance); a mid-GOP cut therefore begins up to one GOP earlier than requested instead of dropping video packets — without keyframe data the trim runs unsnapped (graceful fallback). Pinned by `TestTrimMidGOPSnapsToPreviousKeyframe`
 4. Registry immutability: fixing a broken npm package or README requires a new version tag, never a force-publish

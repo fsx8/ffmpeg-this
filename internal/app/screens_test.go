@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -16,11 +17,21 @@ import (
 	"github.com/fsx8/ffwiz/internal/ffprobe"
 )
 
+func flagValue(args []string, flag string) string {
+	for i, a := range args {
+		if a == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
 // --- test doubles ---
 
 type fakeProber struct {
-	results map[string]*ffprobe.ProbeResult
-	err     map[string]error
+	results   map[string]*ffprobe.ProbeResult
+	err       map[string]error
+	keyframes map[string][]float64
 }
 
 func (f *fakeProber) Probe(_ context.Context, path string) (*ffprobe.ProbeResult, error) {
@@ -48,6 +59,13 @@ func (f *fakeProber) HasAudio(ctx context.Context, path string) (bool, error) {
 	return false, nil
 }
 
+func (f *fakeProber) Keyframes(_ context.Context, path string) ([]float64, error) {
+	if kf, ok := f.keyframes[path]; ok {
+		return kf, nil
+	}
+	return nil, nil
+}
+
 type fakeRunner struct {
 	err error
 }
@@ -59,9 +77,13 @@ func (f fakeRunner) Run(_ context.Context, _ execx.Cmd) (string, string, error) 
 	return "", "", nil
 }
 
-func (f fakeRunner) RunStreaming(_ context.Context, _ execx.Cmd, _ func(string)) (int, error) {
-	if f.err != nil {
+func (f fakeRunner) RunStreaming(_ context.Context, _ execx.Cmd, _, onStderr func(string)) (int, error) {
+	if f.err != nil && onStderr != nil {
+		onStderr("boom stderr")
 		return 1, f.err
+	}
+	if onStderr != nil {
+		onStderr("fake stderr line")
 	}
 	return 0, nil
 }
@@ -176,8 +198,12 @@ func TestTrimWizard_EnterValidatesTimes(t *testing.T) {
 	if m.err != "" {
 		t.Fatalf("valid range rejected: %s", m.err)
 	}
+	if m.step != "snapping" {
+		t.Fatalf("valid range must enter the keyframe-snapping step, got %q", m.step)
+	}
+	_, cmd = m.Update(trimKeyframesMsg{})
 	if !hasMsg[pushMsg](msgsOf(cmd)) {
-		t.Fatal("expected the exec screen to be pushed")
+		t.Fatal("expected the exec screen to be pushed after keyframe probing")
 	}
 }
 
@@ -200,8 +226,72 @@ func TestTrimWizard_OverwriteNeedsSecondEnter(t *testing.T) {
 	}
 
 	_, cmd = m.Update(keyMsg("enter"))
+	if hasMsg[pushMsg](msgsOf(cmd)) {
+		t.Fatal("second Enter starts keyframe probing, not the exec screen yet")
+	}
+	_, cmd = m.Update(trimKeyframesMsg{})
 	if !hasMsg[pushMsg](msgsOf(cmd)) {
 		t.Fatal("second Enter should confirm the overwrite and run")
+	}
+}
+
+func execOfPush(t *testing.T, cmd tea.Cmd) *execModel {
+	t.Helper()
+	for _, msg := range msgsOf(cmd) {
+		if p, ok := msg.(pushMsg); ok {
+			em, ok := p.m.(*execModel)
+			if !ok {
+				t.Fatalf("pushed model is %T, want *execModel", p.m)
+			}
+			return em
+		}
+	}
+	t.Fatal("no pushMsg produced")
+	return nil
+}
+
+func TestTrimWizard_SnapsStartToPreviousKeyframe(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "clip.mp4")
+	kf := []float64{0, 2, 4, 6, 8, 10}
+	cfg := Config{Prober: &fakeProber{keyframes: map[string][]float64{in: kf}}}
+
+	m := newTrimWizard(cfg, in)
+	m.start.SetValue("5")
+	m.end.SetValue("9")
+
+	_, cmd := m.Update(keyMsg("enter"))
+	if m.step != "snapping" {
+		t.Fatalf("expected snapping step, got %q", m.step)
+	}
+	_, cmd = m.Update(trimKeyframesMsg{keyframes: kf})
+	em := execOfPush(t, cmd)
+	if got := flagValue(em.cmd.Args, "-ss"); got != "00:00:04" {
+		t.Fatalf("snapped -ss = %q, want 00:00:04 (previous keyframe)", got)
+	}
+	if got := flagValue(em.cmd.Args, "-to"); got != "00:00:09" {
+		t.Fatalf("-to = %q, want 00:00:09 (end unchanged)", got)
+	}
+	if !strings.Contains(em.title, "00:00:04") {
+		t.Fatalf("exec title should surface the snapped start, got %q", em.title)
+	}
+}
+
+func TestTrimWizard_WithoutKeyframesTrimsUnsnapped(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "clip.mp4")
+	m := newTrimWizard(Config{}, in) // nil Prober: immediate empty keyframes
+	m.start.SetValue("5")
+	m.end.SetValue("9")
+
+	_, cmd := m.Update(keyMsg("enter"))
+	_, cmd = m.Update(trimKeyframesMsg{})
+	em := execOfPush(t, cmd)
+	if got := flagValue(em.cmd.Args, "-ss"); got != "00:00:05" {
+		t.Fatalf("-ss = %q, want the unsnapped 00:00:05", got)
+	}
+	if strings.Contains(em.title, "lossless cut") {
+		t.Fatalf("title should not claim snapping, got %q", em.title)
 	}
 }
 

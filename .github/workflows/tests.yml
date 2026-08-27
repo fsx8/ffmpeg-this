@@ -17,5 +17,14 @@ jobs:
           go-version-file: go.mod
           check-latest: true
 
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Generate test media fixtures
+        run: ./scripts/testmedia.sh
+
       - name: Run unit tests
         run: go test ./...
+
+      - name: Run integration tests
+        run: go test -tags=integration ./...

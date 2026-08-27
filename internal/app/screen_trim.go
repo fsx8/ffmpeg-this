@@ -1,9 +1,13 @@
 package app
 
 import (
+	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -11,6 +15,17 @@ import (
 	"github.com/fsx8/ffwiz/internal/execx"
 	ffx "github.com/fsx8/ffwiz/internal/ffmpeg"
 )
+
+type trimKeyframesMsg struct {
+	keyframes []float64
+	err       error
+}
+
+type trimPending struct {
+	startSec float64
+	endSec   float64
+	outPath  string
+}
 
 type trimWizard struct {
 	cfg      Config
@@ -24,6 +39,10 @@ type trimWizard struct {
 	err      string
 	warnPath string // output path the overwrite warning was armed for
 
+	step    string // "form" | "snapping"
+	spin    spinner.Model
+	pending trimPending
+
 	style lipgloss.Style
 }
 
@@ -36,6 +55,8 @@ func newTrimWizard(cfg Config, filePath string) *trimWizard {
 		ti.Width = 30
 		return ti
 	}
+	sp := spinner.New()
+	sp.Spinner = spinner.Dot
 	start := makeInput("HH:MM:SS or seconds")
 	end := makeInput("HH:MM:SS or seconds")
 	out := makeInput(ffx.TrimOutputName(filePath))
@@ -48,6 +69,8 @@ func newTrimWizard(cfg Config, filePath string) *trimWizard {
 		end:      end,
 		out:      out,
 		focus:    0,
+		step:     "form",
+		spin:     sp,
 		style:    lipgloss.NewStyle().Padding(1, 2),
 	}
 }
@@ -56,12 +79,23 @@ func (m *trimWizard) Init() tea.Cmd { return textinput.Blink }
 
 func (m *trimWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case trimKeyframesMsg:
+		return m.startTrim(msg)
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc":
+			if m.step == "snapping" {
+				m.step = "form"
+				return m, textinput.Blink
+			}
 			m.warnPath = ""
 			m.err = ""
 			return m, pop()
+		}
+		if m.step != "form" {
+			return m, nil
+		}
+		switch msg.String() {
 		case "tab", "down":
 			m.focus = (m.focus + 1) % 3
 			m.updateFocus()
@@ -94,11 +128,23 @@ func (m *trimWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.warnPath = ""
-			cmd := ffx.BuildTrimCmd(m.filePath, start, end, outPath)
-			return m, push(newExecScreen(m.cfg, "Trimming video…", execx.Cmd{Name: "ffmpeg", Args: cmd.Args}))
+			startSec, _ := ffx.ParseTimeSpec(start)
+			endSec, _ := ffx.ParseTimeSpec(end)
+			m.pending = trimPending{startSec: startSec, endSec: endSec, outPath: outPath}
+			m.step = "snapping"
+			return m, tea.Batch(m.spin.Tick, m.probeKeyframesCmd())
+		}
+	case spinner.TickMsg:
+		if m.step == "snapping" {
+			var cmd tea.Cmd
+			m.spin, cmd = m.spin.Update(msg)
+			return m, cmd
 		}
 	}
 
+	if m.step != "form" {
+		return m, nil
+	}
 	var cmd tea.Cmd
 	switch m.focus {
 	case 0:
@@ -111,7 +157,44 @@ func (m *trimWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m *trimWizard) probeKeyframesCmd() tea.Cmd {
+	prober := m.cfg.Prober
+	path := m.filePath
+	if prober == nil {
+		return func() tea.Msg { return trimKeyframesMsg{} }
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		kf, err := prober.Keyframes(ctx, path)
+		return trimKeyframesMsg{keyframes: kf, err: err}
+	}
+}
+
+// startTrim snaps the cut start to a keyframe and launches the exec screen.
+// Without keyframes (probe failed or unavailable) the trim runs unsnapped —
+// the legacy behavior — rather than blocking the user.
+func (m *trimWizard) startTrim(msg trimKeyframesMsg) (tea.Model, tea.Cmd) {
+	p := m.pending
+	snapped := ffx.SnapToKeyframe(p.startSec, msg.keyframes)
+	title := "Trimming video…"
+	if snapped < p.startSec-0.05 {
+		title = fmt.Sprintf("Trimming video… (lossless cut starts at %s)", ffx.FormatTimeSpec(snapped))
+		if m.cfg.Logger != nil {
+			m.cfg.Logger.Printf("trim: start %s snapped to keyframe %s",
+				ffx.FormatTimeSpec(p.startSec), ffx.FormatTimeSpec(snapped))
+		}
+	}
+	cmd := ffx.BuildTrimCmd(m.filePath, ffx.FormatTimeSpec(snapped), ffx.FormatTimeSpec(p.endSec), p.outPath)
+	return m, push(newExecScreen(m.cfg, title, execx.Cmd{Name: "ffmpeg", Args: cmd.Args}))
+}
+
 func (m *trimWizard) View() string {
+	if m.step == "snapping" {
+		return m.style.Render("Trim Video (lossless)\n\n" +
+			m.spin.View() + " Finding keyframes for a lossless cut…\n\n" +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("Esc to go back"))
+	}
 	errLine := ""
 	if m.err != "" {
 		errLine = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(m.err)
@@ -128,7 +211,7 @@ func (m *trimWizard) View() string {
 		"Output file:\n" + m.out.View() + "\n" +
 		errLine + warnLine + "\n\n" +
 		lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(
-			"Tab to switch fields • Enter to run • Esc to go back\nNote: -c copy cuts on keyframes; the cut may differ slightly from the times you enter.")
+			"Tab to switch fields • Enter to run • Esc to go back\nNote: with -c copy the start is snapped to the previous keyframe, so the\ncut may begin slightly earlier than requested (lossless, audio in sync).")
 	return m.style.Render(s)
 }
 

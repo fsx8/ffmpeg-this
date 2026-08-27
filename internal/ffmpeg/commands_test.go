@@ -27,6 +27,52 @@ func TestBuildTrimCmd(t *testing.T) {
 	}
 }
 
+func TestSnapToKeyframe(t *testing.T) {
+	kf := []float64{0, 2, 4, 6, 8, 10}
+	cases := []struct {
+		start float64
+		want  float64
+	}{
+		{5, 4},
+		{4, 4},
+		{4.04, 4},
+		{3.99, 4},
+		{3.94, 2},
+		{0, 0},
+		{20, 10},
+		{-1, 0},
+	}
+	for _, c := range cases {
+		if got := SnapToKeyframe(c.start, kf); got != c.want {
+			t.Fatalf("SnapToKeyframe(%v) = %v, want %v", c.start, got, c.want)
+		}
+	}
+	if got := SnapToKeyframe(5, nil); got != 5 {
+		t.Fatalf("empty keyframes must not alter start, got %v", got)
+	}
+	if got := SnapToKeyframe(5, []float64{6}); got != 6 {
+		t.Fatalf("start before first keyframe must snap forward, got %v", got)
+	}
+}
+
+func TestFormatTimeSpec(t *testing.T) {
+	cases := []struct {
+		sec  float64
+		want string
+	}{
+		{0, "00:00:00"},
+		{4, "00:00:04"},
+		{65.5, "00:01:05.500"},
+		{3661.25, "01:01:01.250"},
+		{-3, "00:00:00"},
+	}
+	for _, c := range cases {
+		if got := FormatTimeSpec(c.sec); got != c.want {
+			t.Fatalf("FormatTimeSpec(%v) = %q, want %q", c.sec, got, c.want)
+		}
+	}
+}
+
 func TestExtractAudioOutputName(t *testing.T) {
 	if got, want := ExtractAudioOutputName("movie.mkv", "mp3"), "movie_audio.mp3"; got != want {
 		t.Fatalf("got %q want %q", got, want)

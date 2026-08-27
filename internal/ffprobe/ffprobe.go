@@ -11,6 +11,10 @@ import (
 type Prober interface {
 	Probe(ctx context.Context, path string) (*ProbeResult, error)
 	HasAudio(ctx context.Context, path string) (bool, error)
+	// Keyframes returns the timestamps (in seconds) of the default video
+	// stream's keyframes, probed via -skip_frame nokey (decodes keyframes
+	// only). Used for lossless trim snapping.
+	Keyframes(ctx context.Context, path string) ([]float64, error)
 }
 
 type prober struct {
