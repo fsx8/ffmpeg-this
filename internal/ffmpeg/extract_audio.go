@@ -12,11 +12,10 @@ func ExtractAudioOutputName(inputPath, format string) string {
 }
 
 func BuildExtractAudioCmd(inputPath, format, outputPath string) Cmd {
-	acodec := format
+	args := []string{"-i", inputPath, "-vn", "-acodec", AudioCodecFor(format)}
 	if format == "mp3" {
-		acodec = "libmp3lame"
+		args = append(args, "-b:a", "192k")
 	}
-	return Cmd{
-		Args: []string{"-i", inputPath, "-vn", "-acodec", acodec, "-y", outputPath},
-	}
+	args = append(args, "-y", outputPath)
+	return Cmd{Args: args}
 }

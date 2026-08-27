@@ -3,11 +3,13 @@ package app
 import (
 	"context"
 	"errors"
-	"os"
+	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -21,6 +23,7 @@ type joinItem struct {
 	name     string
 	absPath  string
 	selected bool
+	order    int // 1-based join position; 0 when unselected
 }
 
 func (i *joinItem) Title() string {
@@ -30,8 +33,19 @@ func (i *joinItem) Title() string {
 	}
 	return box + " " + i.name
 }
-func (i *joinItem) Description() string { return "" }
+func (i *joinItem) Description() string {
+	if i.selected {
+		return fmt.Sprintf("joined at position %d", i.order)
+	}
+	return ""
+}
 func (i *joinItem) FilterValue() string { return i.name }
+
+type joinProbeMsg struct {
+	inputs []ffx.JoinInput
+	target ffx.JoinTargets
+	err    error
+}
 
 type joinWizard struct {
 	cfg Config
@@ -39,9 +53,13 @@ type joinWizard struct {
 
 	list list.Model
 	out  textinput.Model
+	spin spinner.Model
 
-	step string // "select" | "output"
+	step string // "select" | "output" | "probing" | "confirm"
 	err  string
+
+	inputs []ffx.JoinInput
+	target ffx.JoinTargets
 
 	style lipgloss.Style
 }
@@ -62,6 +80,10 @@ func newJoinWizard(cfg Config, dir string) *joinWizard {
 	out.Width = 40
 	out.SetValue("joined_video.mp4")
 	j.out = out
+
+	sp := spinner.New()
+	sp.Spinner = spinner.Dot
+	j.spin = sp
 	return j
 }
 
@@ -88,25 +110,68 @@ func (m *joinWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.list.SetSize(msg.Width-4, msg.Height-6)
+	case spinner.TickMsg:
+		if m.step == "probing" {
+			var cmd tea.Cmd
+			m.spin, cmd = m.spin.Update(msg)
+			return m, cmd
+		}
+	case joinProbeMsg:
+		if m.step != "probing" {
+			return m, nil
+		}
+		if msg.err != nil {
+			m.err = msg.err.Error()
+			m.step = "select"
+			return m, nil
+		}
+		m.err = ""
+		m.inputs = msg.inputs
+		m.target = msg.target
+		m.step = "confirm"
+		return m, nil
 	case tea.KeyMsg:
+		filtering := m.step == "select" && filterActive(m.list)
+		typing := m.step == "output" && textInputFocused(m.out)
+
 		switch msg.String() {
 		case "q":
+			if filtering || typing {
+				break
+			}
 			return m, tea.Quit
 		case "esc":
-			if m.step == "output" {
+			if filtering {
+				break // let the list clear/leave its filter
+			}
+			switch m.step {
+			case "confirm":
+				m.step = "output"
+				m.out.Focus()
+				return m, textinput.Blink
+			case "probing":
+				m.step = "select"
+				return m, nil
+			case "output":
 				m.step = "select"
 				m.out.Blur()
 				return m, nil
+			default:
+				return m, pop()
 			}
-			return m, pop()
 		case " ":
-			if m.step == "select" {
+			if m.step == "select" && !filtering {
 				if it, ok := m.list.SelectedItem().(*joinItem); ok {
 					it.selected = !it.selected
+					m.recomputeJoinOrder()
+					m.err = ""
 					return m, nil
 				}
 			}
 		case "enter":
+			if filtering {
+				break // let the list apply the filter
+			}
 			switch m.step {
 			case "select":
 				selected := m.selectedPaths()
@@ -124,19 +189,14 @@ func (m *joinWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.err = "output file name is required"
 					return m, nil
 				}
-				outPath := outName
-				if !filepath.IsAbs(outPath) {
-					outPath = filepath.Join(m.dir, outName)
-				}
-				selected := m.selectedPaths()
-				first := selected[0]
-				target, err := m.joinTargets(first)
-				if err != nil {
-					m.err = err.Error()
-					return m, nil
-				}
-				ff := ffx.BuildJoinCmd(selected, outPath, target)
-				return m, push(newExecScreen(m.cfg, "Joining videos…", execx.Cmd{Name: "ffmpeg", Args: ff.Args}))
+				m.err = ""
+				m.out.Blur()
+				m.step = "probing"
+				return m, tea.Batch(m.spin.Tick, m.probeCmd(m.selectedPaths()))
+			case "confirm":
+				outPath := m.outputPath()
+				cmd := ffx.BuildJoinCmd(m.inputs, outPath, m.target)
+				return m, push(newExecScreen(m.cfg, "Joining videos…", execx.Cmd{Name: "ffmpeg", Args: cmd.Args}))
 			}
 		}
 	}
@@ -146,6 +206,9 @@ func (m *joinWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.out, cmd = m.out.Update(msg)
 		return m, cmd
 	}
+	if m.step == "probing" || m.step == "confirm" {
+		return m, nil
+	}
 
 	var cmd tea.Cmd
 	m.list, cmd = m.list.Update(msg)
@@ -153,20 +216,46 @@ func (m *joinWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *joinWizard) View() string {
-	if m.step == "output" {
+	switch m.step {
+	case "probing":
+		return m.style.Render(m.spin.View() + " Analyzing selected videos…\n\nEsc to go back")
+	case "confirm":
+		return m.style.Render(m.confirmView())
+	case "output":
 		errLine := ""
 		if m.err != "" {
 			errLine = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(m.err)
 		}
-		return m.style.Render("Output file:\n\n" + m.out.View() + errLine + "\n\nEnter to start • Esc to go back")
+		return m.style.Render("Output file:\n\n" + m.out.View() + errLine + "\n\nEnter to continue • Esc to go back")
+	default:
+		info := lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(
+			"Space toggles • / to filter • Enter to continue • Esc to go back\nFiles are joined in list order (natural sort)")
+		errLine := ""
+		if m.err != "" {
+			errLine = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(m.err)
+		}
+		return m.style.Render(m.list.View() + "\n" + info + errLine)
 	}
+}
 
-	info := lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("Space toggles selection • Enter to continue • Esc to go back")
-	errLine := ""
-	if m.err != "" {
-		errLine = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(m.err)
+func (m *joinWizard) confirmView() string {
+	var sb strings.Builder
+	sb.WriteString(lipgloss.NewStyle().Bold(true).Render(fmt.Sprintf("Join %d videos", len(m.inputs))) + "\n\n")
+	for i, in := range m.inputs {
+		sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, filepath.Base(in.Path)))
 	}
-	return m.style.Render(m.list.View() + "\n" + info + errLine)
+	sb.WriteString(fmt.Sprintf("\nTarget: %dx%d @ %s Hz\n", m.target.Width, m.target.Height, m.target.SampleRate))
+
+	cmd := ffx.BuildJoinCmd(m.inputs, m.outputPath(), m.target)
+	sb.WriteString("\n" + lipgloss.NewStyle().Bold(true).Render("Command:") + "\n")
+	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(strings.Join(cmd.FullArgs(), " ")) + "\n")
+
+	if outputExists(m.outputPath()) {
+		sb.WriteString("\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render(
+			"Output file exists: "+m.outputPath()+" — it will be overwritten."))
+	}
+	sb.WriteString("\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("Enter to run • Esc to go back"))
+	return sb.String()
 }
 
 func (m *joinWizard) selectedPaths() []string {
@@ -179,33 +268,86 @@ func (m *joinWizard) selectedPaths() []string {
 	return selected
 }
 
-func (m *joinWizard) joinTargets(firstPath string) (ffx.JoinTargets, error) {
-	if _, err := os.Stat(firstPath); err != nil {
-		return ffx.JoinTargets{}, err
+func (m *joinWizard) outputPath() string {
+	outName := strings.TrimSpace(m.out.Value())
+	if outName == "" {
+		outName = "joined_video.mp4"
 	}
-	probe, err := m.cfg.Prober.Probe(context.Background(), firstPath)
-	if err != nil {
-		return ffx.JoinTargets{}, err
+	if filepath.IsAbs(outName) {
+		return outName
 	}
-	var vWidth, vHeight int
-	sar := "1:1"
-	var sampleRate string
-	for _, s := range probe.Streams {
-		if s.CodecType == "video" && vWidth == 0 {
-			vWidth, vHeight = s.Width, s.Height
-			if s.SampleAspectRatio != "" {
-				sar = s.SampleAspectRatio
+	return filepath.Join(m.dir, outName)
+}
+
+// recomputeJoinOrder numbers the selected items by their position in the
+// list, which is the order they will be joined in.
+func (m *joinWizard) recomputeJoinOrder() {
+	n := 0
+	for _, it := range m.list.Items() {
+		ji, ok := it.(*joinItem)
+		if !ok {
+			continue
+		}
+		if ji.selected {
+			n++
+			ji.order = n
+		} else {
+			ji.order = 0
+		}
+	}
+}
+
+// probeCmd probes every selected input off the UI thread so slow storage
+// cannot freeze the TUI, and derives the join targets from the first input.
+func (m *joinWizard) probeCmd(selected []string) tea.Cmd {
+	cfg := m.cfg
+	return func() tea.Msg {
+		inputs := make([]ffx.JoinInput, 0, len(selected))
+		var target ffx.JoinTargets
+		haveResolution := false
+		for _, p := range selected {
+			res, err := cfg.Prober.Probe(context.Background(), p)
+			if err != nil {
+				return joinProbeMsg{err: fmt.Errorf("%s: %w", filepath.Base(p), err)}
 			}
+			in := ffx.JoinInput{Path: p}
+			for _, s := range res.Streams {
+				if s.CodecType == "audio" {
+					in.HasAudio = true
+					if target.SampleRate == "" {
+						target.SampleRate = s.SampleRate
+					}
+				}
+				if s.CodecType == "video" && !haveResolution {
+					target.Width, target.Height = s.Width, s.Height
+					haveResolution = true
+					if s.SampleAspectRatio != "" {
+						target.SAR = s.SampleAspectRatio
+					}
+				}
+			}
+			if res.Format.Duration != "" {
+				if d, err := strconv.ParseFloat(res.Format.Duration, 64); err == nil {
+					in.DurationSec = d
+				}
+			}
+			inputs = append(inputs, in)
 		}
-		if s.CodecType == "audio" && sampleRate == "" {
-			sampleRate = s.SampleRate
+		if !haveResolution || target.Width == 0 || target.Height == 0 {
+			return joinProbeMsg{err: errors.New("could not determine target resolution (no video stream found)")}
+		}
+		if anyHasAudio(inputs) && target.SampleRate == "" {
+			return joinProbeMsg{err: errors.New("could not determine target audio sample rate")}
+		}
+		return joinProbeMsg{inputs: inputs, target: target}
+	}
+}
+
+func anyHasAudio(inputs []ffx.JoinInput) bool {
+	for _, in := range inputs {
+		if in.HasAudio {
+			return true
 		}
 	}
-	if vWidth == 0 || vHeight == 0 {
-		return ffx.JoinTargets{}, errors.New("could not determine target resolution from first video")
-	}
-	if sampleRate == "" {
-		return ffx.JoinTargets{}, errors.New("could not determine target audio sample rate from first video")
-	}
-	return ffx.JoinTargets{Width: vWidth, Height: vHeight, SAR: sar, SampleRate: sampleRate}, nil
+	return false
 }

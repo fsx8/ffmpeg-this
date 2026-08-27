@@ -29,24 +29,26 @@ func BuildBatchConvertCmd(inputPath, outputPath, format string, quality BatchVid
 
 	switch {
 	case isVideo:
+		// The webm muxer only accepts VP8/VP9/AV1 video and Vorbis/Opus
+		// audio, so a stream copy of typical H.264/AAC sources cannot work;
+		// re-encode instead (the UI hides the copy preset for webm).
+		if format == "webm" && quality == QualitySame {
+			quality = QualityMedium
+		}
 		switch quality {
 		case QualitySame:
 			args = append(args, "-c", "copy")
 		case QualityHigh, QualityMedium, QualityLow:
-			crf := map[BatchVideoQuality]string{QualityHigh: "18", QualityMedium: "23", QualityLow: "28"}[quality]
-			args = append(args, "-c:v", "libx264", "-crf", crf, "-pix_fmt", "yuv420p")
-			if hasAudio {
-				args = append(args, "-c:a", "aac", "-b:a", "192k")
+			if format == "webm" {
+				args = append(args, "-c:v", "libvpx-vp9", "-crf", webmCRF(quality), "-b:v", "0")
+				args = appendAudio(args, hasAudio, "libopus", "128k")
 			} else {
-				args = append(args, "-an")
+				args = append(args, "-c:v", "libx264", "-crf", h264CRF(quality), "-pix_fmt", "yuv420p")
+				args = appendAudio(args, hasAudio, "aac", "192k")
 			}
 		}
 	case isAudio:
-		acodec := format
-		if format == "mp3" {
-			acodec = "libmp3lame"
-		}
-		args = append(args, "-vn", "-c:a", acodec)
+		args = append(args, "-vn", "-c:a", AudioCodecFor(format))
 		if format == "mp3" {
 			args = append(args, "-b:a", "192k")
 		}
@@ -57,6 +59,23 @@ func BuildBatchConvertCmd(inputPath, outputPath, format string, quality BatchVid
 
 	args = append(args, "-y", outputPath)
 	return Cmd{Args: args}
+}
+
+func appendAudio(args []string, hasAudio bool, codec, bitrate string) []string {
+	if !hasAudio {
+		return append(args, "-an")
+	}
+	return append(args, "-c:a", codec, "-b:a", bitrate)
+}
+
+func h264CRF(q BatchVideoQuality) string {
+	return map[BatchVideoQuality]string{QualityHigh: "18", QualityMedium: "23", QualityLow: "28"}[q]
+}
+
+// webmCRF maps the quality presets to VP9-appropriate CRF values
+// (VP9 CRF range is much higher than x264's for comparable quality).
+func webmCRF(q BatchVideoQuality) string {
+	return map[BatchVideoQuality]string{QualityHigh: "24", QualityMedium: "31", QualityLow: "38"}[q]
 }
 
 func BuildGifPaletteCmd(inputPath, palettePath string) Cmd {

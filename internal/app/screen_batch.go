@@ -20,7 +20,7 @@ import (
 type batchWizard struct {
 	cfg     Config
 	dir     string
-	step    string // "format" | "quality" | "confirm"
+	step    string // "format" | "quality"
 	format  string
 	quality ffx.BatchVideoQuality
 
@@ -28,13 +28,14 @@ type batchWizard struct {
 	style lipgloss.Style
 }
 
+var batchFormats = []list.Item{
+	formatItem{"mp4"}, formatItem{"mkv"}, formatItem{"mov"}, formatItem{"avi"}, formatItem{"webm"},
+	formatItem{"mp3"}, formatItem{"flac"}, formatItem{"wav"},
+	formatItem{"gif"},
+}
+
 func newBatchWizard(cfg Config, dir string) *batchWizard {
-	items := []list.Item{
-		formatItem{"mp4"}, formatItem{"mkv"}, formatItem{"mov"}, formatItem{"avi"}, formatItem{"webm"},
-		formatItem{"mp3"}, formatItem{"flac"}, formatItem{"wav"},
-		formatItem{"gif"},
-	}
-	l := list.New(items, list.NewDefaultDelegate(), 0, 0)
+	l := list.New(batchFormats, list.NewDefaultDelegate(), 0, 0)
 	l.Title = "Batch convert: select output format"
 	l.SetFilteringEnabled(false)
 	l.DisableQuitKeybindings()
@@ -78,7 +79,9 @@ func (m *batchWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.setQualityList()
 					return m, nil
 				}
-				m.step = "confirm"
+				// Audio targets don't need a quality choice; run directly.
+				// Returning from the run screen lands back on format selection.
+				m.step = "format"
 				return m, push(newBatchRun(m.cfg, m.dir, m.format, m.quality))
 			case "quality":
 				switch fi.v {
@@ -91,7 +94,9 @@ func (m *batchWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case "Low (CRF 28)":
 					m.quality = ffx.QualityLow
 				}
-				m.step = "confirm"
+				// Returning from the run screen lands back on format selection.
+				m.step = "format"
+				m.setFormatList()
 				return m, push(newBatchRun(m.cfg, m.dir, m.format, m.quality))
 			}
 		}
@@ -103,25 +108,24 @@ func (m *batchWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *batchWizard) View() string {
-	return m.style.Render(m.list.View() + "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("Enter to select • Esc to go back"))
+	return m.style.Render(m.list.View() + "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("Enter to select • Esc to go back • q to quit"))
 }
 
 func (m *batchWizard) setFormatList() {
-	items := []list.Item{
-		formatItem{"mp4"}, formatItem{"mkv"}, formatItem{"mov"}, formatItem{"avi"}, formatItem{"webm"},
-		formatItem{"mp3"}, formatItem{"flac"}, formatItem{"wav"},
-		formatItem{"gif"},
-	}
 	m.list.Title = "Batch convert: select output format"
-	m.list.SetItems(items)
+	m.list.SetItems(batchFormats)
 }
 
 func (m *batchWizard) setQualityList() {
 	items := []list.Item{
-		formatItem{"Same as source"},
 		formatItem{"High (CRF 18)"},
 		formatItem{"Medium (CRF 23)"},
 		formatItem{"Low (CRF 28)"},
+	}
+	if m.format != "webm" {
+		// webm cannot hold typical H.264/AAC sources, so a stream copy
+		// would fail; hide the option (see BuildBatchConvertCmd).
+		items = append([]list.Item{formatItem{"Same as source"}}, items...)
 	}
 	m.list.Title = "Select quality preset"
 	m.list.SetItems(items)
@@ -137,11 +141,12 @@ func isVideoFormat(format string) bool {
 }
 
 type batchStatusMsg struct {
-	ok      int
-	fail    int
-	skipped int
-	last    string
-	err     error
+	ok        int
+	fail      int
+	skipped   int
+	last      string
+	err       error
+	cancelled bool
 }
 
 type batchRunModel struct {
@@ -153,14 +158,16 @@ type batchRunModel struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	spin    spinner.Model
-	running bool
+	spin       spinner.Model
+	running    bool
+	cancelling bool
 
-	ok      int
-	fail    int
-	skipped int
-	last    string
-	err     string
+	ok        int
+	fail      int
+	skipped   int
+	last      string
+	err       string
+	cancelled bool
 
 	style lipgloss.Style
 }
@@ -193,14 +200,25 @@ func (m *batchRunModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q":
 			if m.running && m.cancel != nil {
 				m.cancel()
+				m.cancelling = true
 			}
 			return m, tea.Quit
 		case "ctrl+c":
 			if m.running && m.cancel != nil {
 				m.cancel()
+				m.cancelling = true
 			}
 			return m, nil
-		case "esc", "enter":
+		case "esc":
+			if m.running {
+				if m.cancel != nil {
+					m.cancel()
+					m.cancelling = true
+				}
+				return m, nil
+			}
+			return m, pop()
+		case "enter":
 			if !m.running {
 				return m, pop()
 			}
@@ -217,6 +235,7 @@ func (m *batchRunModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.fail = msg.fail
 		m.skipped = msg.skipped
 		m.last = msg.last
+		m.cancelled = msg.cancelled
 		if msg.err != nil {
 			m.err = msg.err.Error()
 		}
@@ -227,9 +246,14 @@ func (m *batchRunModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *batchRunModel) View() string {
 	header := lipgloss.NewStyle().Bold(true).Render("Batch conversion") + "\n"
-	if m.running {
-		header += m.spin.View() + " Running…\n"
-	} else {
+	switch {
+	case m.running && m.cancelling:
+		header += m.spin.View() + " Cancelling…\n"
+	case m.running:
+		header += m.spin.View() + " Running… (Esc to cancel)\n"
+	case m.cancelled:
+		header += lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("Cancelled.\n")
+	default:
 		header += lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Render("Done.\n")
 	}
 	stats := lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(
@@ -247,49 +271,82 @@ func (m *batchRunModel) View() string {
 	return m.style.Render(header + stats + last + errLine + footer)
 }
 
+func (m *batchRunModel) logf(format string, args ...any) {
+	if m.cfg.Logger != nil {
+		m.cfg.Logger.Printf(format, args...)
+	}
+}
+
+// runBatchCmd converts every media file in the directory. Files that cannot
+// have the target format (e.g. audio-only files for video targets) are
+// skipped; failures are logged with the ffmpeg stderr for diagnosis.
 func (m *batchRunModel) runBatchCmd() tea.Cmd {
+	cfg := m.cfg
+	dir := m.dir
+	format := m.format
+	quality := m.quality
 	return func() tea.Msg {
-		files, err := media.ListMediaFiles(m.dir)
+		files, err := media.ListMediaFiles(dir)
 		if err != nil {
 			return batchStatusMsg{err: err}
 		}
 		okCount, failCount, skippedCount := 0, 0, 0
 		last := ""
+		cancelled := false
 
 		for _, f := range files {
 			if m.ctx.Err() != nil {
+				cancelled = true
 				last = "cancelled"
 				break
 			}
-			inPath := filepath.Join(m.dir, f)
-			ext := strings.ToLower(filepath.Ext(inPath))
-			isGif := ext == ".gif"
+			inPath := filepath.Join(dir, f)
 
-			hasAudio := false
-			if !isGif {
-				hasAudio, _ = m.cfg.Prober.HasAudio(m.ctx, inPath)
+			res, err := cfg.Prober.Probe(m.ctx, inPath)
+			if err != nil {
+				failCount++
+				last = "probe failed " + f
+				m.logf("batch: probe failed for %s: %v", inPath, err)
+				continue
+			}
+			hasAudio, hasVideo := false, false
+			for _, s := range res.Streams {
+				switch s.CodecType {
+				case "audio":
+					hasAudio = true
+				case "video":
+					hasVideo = true
+				}
 			}
 
-			if (isGif || !hasAudio) && (m.format == "mp3" || m.format == "flac" || m.format == "wav") {
+			if isAudioFormat(format) {
+				if !hasAudio {
+					skippedCount++
+					last = "skipped " + f + " (no audio)"
+					continue
+				}
+			} else if !hasVideo {
 				skippedCount++
-				last = "skipped " + f + " (no audio)"
+				last = "skipped " + f + " (no video)"
 				continue
 			}
 
-			outName := ffx.BatchOutputName(inPath, m.format)
-			outPath := filepath.Join(m.dir, outName)
+			outName := ffx.BatchOutputName(inPath, format)
+			outPath := filepath.Join(dir, outName)
 
-			if m.format == "gif" {
-				palette := filepath.Join(m.dir, "palette_"+strings.TrimSuffix(f, ext)+".png")
-				if _, _, err := m.cfg.Runner.Run(m.ctx, execx.Cmd{Name: "ffmpeg", Args: ffx.BuildGifPaletteCmd(inPath, palette).Args}); err != nil {
+			if format == "gif" {
+				palette := filepath.Join(dir, "palette_"+strings.TrimSuffix(f, filepath.Ext(f))+".png")
+				if _, stderr, err := cfg.Runner.Run(m.ctx, execx.Cmd{Name: "ffmpeg", Args: ffx.BuildGifPaletteCmd(inPath, palette).Args}); err != nil {
 					failCount++
 					last = "failed palette for " + f
+					m.logf("batch: palette generation failed for %s: %v\n%s", inPath, err, stderr)
 					continue
 				}
-				if _, _, err := m.cfg.Runner.Run(m.ctx, execx.Cmd{Name: "ffmpeg", Args: ffx.BuildGifFromPaletteCmd(inPath, palette, outPath).Args}); err != nil {
+				if _, stderr, err := cfg.Runner.Run(m.ctx, execx.Cmd{Name: "ffmpeg", Args: ffx.BuildGifFromPaletteCmd(inPath, palette, outPath).Args}); err != nil {
 					failCount++
 					last = "failed gif for " + f
 					_ = os.Remove(palette)
+					m.logf("batch: gif conversion failed for %s: %v\n%s", inPath, err, stderr)
 					continue
 				}
 				_ = os.Remove(palette)
@@ -298,15 +355,30 @@ func (m *batchRunModel) runBatchCmd() tea.Cmd {
 				continue
 			}
 
-			cmd := ffx.BuildBatchConvertCmd(inPath, outPath, m.format, m.quality, hasAudio)
-			if _, _, err := m.cfg.Runner.Run(m.ctx, execx.Cmd{Name: "ffmpeg", Args: cmd.Args}); err != nil {
+			cmd := ffx.BuildBatchConvertCmd(inPath, outPath, format, quality, hasAudio)
+			if _, stderr, err := cfg.Runner.Run(m.ctx, execx.Cmd{Name: "ffmpeg", Args: cmd.Args}); err != nil {
 				failCount++
 				last = "failed " + f
+				m.logf("batch: conversion failed for %s: %v\n%s", inPath, err, stderr)
+				if m.ctx.Err() != nil {
+					cancelled = true
+					last = "cancelled"
+					break
+				}
 				continue
 			}
 			okCount++
 			last = "converted " + f + " -> " + outName
 		}
-		return batchStatusMsg{ok: okCount, fail: failCount, skipped: skippedCount, last: last, err: nil}
+		return batchStatusMsg{ok: okCount, fail: failCount, skipped: skippedCount, last: last, cancelled: cancelled}
+	}
+}
+
+func isAudioFormat(format string) bool {
+	switch format {
+	case "mp3", "flac", "wav":
+		return true
+	default:
+		return false
 	}
 }

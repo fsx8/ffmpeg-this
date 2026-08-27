@@ -102,31 +102,26 @@ func formatProbe(res *ffprobe.ProbeResult) string {
 	bold := lipgloss.NewStyle().Bold(true)
 	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 
-	sizeMB := float64(0)
-	if res.Format.Size != "" {
-		if n, err := strconv.ParseFloat(res.Format.Size, 64); err == nil {
-			sizeMB = n / (1024 * 1024)
-		}
+	sizeStr := "unknown"
+	if n, err := strconv.ParseFloat(res.Format.Size, 64); err == nil {
+		sizeStr = fmt.Sprintf("%0.2f MB", n/(1024*1024))
 	}
-	durationSec := float64(0)
-	if res.Format.Duration != "" {
-		if n, err := strconv.ParseFloat(res.Format.Duration, 64); err == nil {
-			durationSec = n
-		}
+	durationStr := "unknown"
+	if n, err := strconv.ParseFloat(res.Format.Duration, 64); err == nil {
+		durationStr = fmt.Sprintf("%0.2f seconds", n)
 	}
-	bitrateKbps := float64(0)
-	if res.Format.BitRate != "" {
-		if n, err := strconv.ParseFloat(res.Format.BitRate, 64); err == nil {
-			bitrateKbps = n / 1000
-		}
+	bitrateStr := "unknown"
+	if n, err := strconv.ParseFloat(res.Format.BitRate, 64); err == nil {
+		bitrateStr = fmt.Sprintf("%0.0f kb/s", n/1000)
 	}
 
 	var sb strings.Builder
 	sb.WriteString(bold.Render("File Information") + "\n")
-	sb.WriteString(fmt.Sprintf("%s %0.2f MB\n", dim.Render("Size:"), sizeMB))
-	sb.WriteString(fmt.Sprintf("%s %0.2f seconds\n", dim.Render("Duration:"), durationSec))
+	sb.WriteString(fmt.Sprintf("%s %s\n", dim.Render("File:"), res.Format.Filename))
+	sb.WriteString(fmt.Sprintf("%s %s\n", dim.Render("Size:"), sizeStr))
+	sb.WriteString(fmt.Sprintf("%s %s\n", dim.Render("Duration:"), durationStr))
 	sb.WriteString(fmt.Sprintf("%s %s\n", dim.Render("Format:"), res.Format.FormatLongName))
-	sb.WriteString(fmt.Sprintf("%s %0.0f kb/s\n", dim.Render("Bitrate:"), bitrateKbps))
+	sb.WriteString(fmt.Sprintf("%s %s\n", dim.Render("Bitrate:"), bitrateStr))
 
 	writeStreams := func(kind string) {
 		var ss []ffprobe.Stream
@@ -153,5 +148,6 @@ func formatProbe(res *ffprobe.ProbeResult) string {
 
 	writeStreams("video")
 	writeStreams("audio")
+	writeStreams("subtitle")
 	return sb.String()
 }

@@ -109,8 +109,12 @@ func (m *tracksWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.codecList.SetSize(msg.Width-4, msg.Height-6)
 		}
 	case tea.KeyMsg:
+		typing := m.step == "output" && textInputFocused(m.out)
 		switch msg.String() {
 		case "q":
+			if typing {
+				break
+			}
 			return m, tea.Quit
 		case "esc":
 			switch m.step {
@@ -196,9 +200,6 @@ func (m *tracksWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "n":
 				m.step = "tracks"
 				return m, nil
-			case "esc":
-				m.step = "tracks"
-				return m, nil
 			}
 		}
 		return m, nil
@@ -260,12 +261,6 @@ func (m *tracksWizard) View() string {
 	if m.loading {
 		return m.style.Render(m.spin.View() + " Analyzing tracks…\n\nEsc to go back")
 	}
-	if m.err != "" && m.step == "tracks" {
-		// Show errors in tracks view, but allow continuing.
-	}
-	if m.err != "" && m.step != "tracks" {
-		// Keep showing within step views.
-	}
 
 	switch m.step {
 	case "codec":
@@ -282,7 +277,12 @@ func (m *tracksWizard) View() string {
 		if m.err != "" {
 			errLine = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(m.err)
 		}
-		return m.style.Render("Generated command:\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(cmdStr) + errLine + "\n\nEnter/Y to run • N to cancel • Esc to go back")
+		warnLine := ""
+		if outputExists(m.outputPath()) {
+			warnLine = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render(
+				"Output file exists: "+m.outputPath()+" — it will be overwritten.")
+		}
+		return m.style.Render("Generated command:\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(cmdStr) + errLine + warnLine + "\n\nEnter/Y to run • N to cancel • Esc to go back")
 	default:
 		return m.style.Render(m.tracksView())
 	}
@@ -399,5 +399,5 @@ func (m *tracksWizard) previewCommand() string {
 	if cmd == nil {
 		return "ffmpeg (no output; all tracks removed)"
 	}
-	return "ffmpeg " + strings.Join(cmd.Args, " ")
+	return strings.Join(cmd.FullArgs(), " ")
 }

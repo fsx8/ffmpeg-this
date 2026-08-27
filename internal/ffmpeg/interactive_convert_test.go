@@ -194,12 +194,108 @@ func TestInteractiveConvert_ConvertSubtitleMovTextChoiceIsNormalized(t *testing.
 		{Index: 5, Type: TrackSubtitle, Codec: "subrip"},
 	}
 	actions := map[int]TrackActionInfo{2: {Action: ActionConvert, Codec: "mov_text (MP4)"}}
-	cmd := BuildInteractiveConvertCmd("input.mkv", "output.mkv", tracks, actions)
+	cmd := BuildInteractiveConvertCmd("input.mp4", "output.mp4", tracks, actions)
 	if cmd == nil {
 		t.Fatal("expected cmd")
 	}
 	if got := flagValue(cmd.Args, "-c:s:0"); got != "mov_text" {
 		t.Fatalf("expected mov_text, got %q", got)
+	}
+}
+
+func TestInteractiveConvert_MOVTextInMkvBecomesSRT(t *testing.T) {
+	tracks := []Track{
+		{Index: 0, Type: TrackVideo, Codec: "h264"},
+		{Index: 2, Type: TrackAudio, Codec: "aac"},
+		{Index: 5, Type: TrackSubtitle, Codec: "subrip"},
+	}
+	actions := map[int]TrackActionInfo{2: {Action: ActionConvert, Codec: "mov_text (MP4)"}}
+	cmd := BuildInteractiveConvertCmd("input.mp4", "output.mkv", tracks, actions)
+	if cmd == nil {
+		t.Fatal("expected cmd")
+	}
+	if got := flagValue(cmd.Args, "-c:s:0"); got != "srt" {
+		t.Fatalf("mkv cannot hold mov_text; expected srt, got %q", got)
+	}
+}
+
+func TestInteractiveConvert_SubtitleCopyIntoMP4BecomesMOVText(t *testing.T) {
+	tracks := []Track{
+		{Index: 0, Type: TrackVideo, Codec: "h264"},
+		{Index: 5, Type: TrackSubtitle, Codec: "subrip"},
+	}
+	cmd := BuildInteractiveConvertCmd("input.mkv", "output.mp4", tracks, nil)
+	if cmd == nil {
+		t.Fatal("expected cmd")
+	}
+	if got := flagValue(cmd.Args, "-c:s:0"); got != "mov_text" {
+		t.Fatalf("mp4 cannot hold srt streams; expected mov_text, got %q", got)
+	}
+}
+
+func TestInteractiveConvert_WebmReEncodesH264Copy(t *testing.T) {
+	tracks := []Track{
+		{Index: 0, Type: TrackVideo, Codec: "h264"},
+		{Index: 2, Type: TrackAudio, Codec: "aac"},
+	}
+	cmd := BuildInteractiveConvertCmd("input.mp4", "output.webm", tracks, nil)
+	if cmd == nil {
+		t.Fatal("expected cmd")
+	}
+	if got := flagValue(cmd.Args, "-c:v:0"); got != "libvpx-vp9" {
+		t.Fatalf("webm cannot hold H.264; expected libvpx-vp9, got %q", got)
+	}
+	if got := flagValue(cmd.Args, "-c:a:0"); got != "libopus" {
+		t.Fatalf("webm cannot hold AAC; expected libopus, got %q", got)
+	}
+}
+
+func TestInteractiveConvert_WebmKeepsVP9Copy(t *testing.T) {
+	tracks := []Track{
+		{Index: 0, Type: TrackVideo, Codec: "vp9"},
+		{Index: 2, Type: TrackAudio, Codec: "opus"},
+	}
+	cmd := BuildInteractiveConvertCmd("input.webm", "output.webm", tracks, nil)
+	if cmd == nil {
+		t.Fatal("expected cmd")
+	}
+	if got := flagValue(cmd.Args, "-c:v:0"); got != "copy" {
+		t.Fatalf("expected copy for VP9 source, got %q", got)
+	}
+	if got := flagValue(cmd.Args, "-c:a:0"); got != "copy" {
+		t.Fatalf("expected copy for opus source, got %q", got)
+	}
+}
+
+func TestInteractiveConvert_WebmDropsSubtitles(t *testing.T) {
+	tracks := []Track{
+		{Index: 0, Type: TrackVideo, Codec: "h264"},
+		{Index: 2, Type: TrackSubtitle, Codec: "subrip"},
+	}
+	cmd := BuildInteractiveConvertCmd("input.mkv", "output.webm", tracks, nil)
+	if cmd == nil {
+		t.Fatal("expected cmd (video kept)")
+	}
+	if got, want := maps(cmd.Args), []string{"0:0"}; !equalStrings(got, want) {
+		t.Fatalf("webm cannot carry subtitles; maps: got %#v want %#v", got, want)
+	}
+}
+
+func TestInteractiveConvert_ConvertFlacSetsNoBitrate(t *testing.T) {
+	tracks := []Track{
+		{Index: 0, Type: TrackVideo, Codec: "h264"},
+		{Index: 2, Type: TrackAudio, Codec: "aac"},
+	}
+	actions := map[int]TrackActionInfo{1: {Action: ActionConvert, Codec: "flac (FLAC)"}}
+	cmd := BuildInteractiveConvertCmd("input.mkv", "output.mkv", tracks, actions)
+	if cmd == nil {
+		t.Fatal("expected cmd")
+	}
+	if got := flagValue(cmd.Args, "-c:a:0"); got != "flac" {
+		t.Fatalf("expected native flac encoder, got %q", got)
+	}
+	if got := flagValue(cmd.Args, "-b:a:0"); got != "" {
+		t.Fatalf("flac is lossless; did not expect a bitrate, got %q", got)
 	}
 }
 

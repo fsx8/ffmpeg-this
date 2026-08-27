@@ -2,7 +2,6 @@ package app
 
 import (
 	"os"
-	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -90,15 +89,4 @@ func (m *rootModel) View() string {
 		return ""
 	}
 	return m.stack[len(m.stack)-1].View()
-}
-
-func abs(p string) string {
-	if p == "" {
-		return ""
-	}
-	ap, err := filepath.Abs(p)
-	if err != nil {
-		return p
-	}
-	return ap
 }

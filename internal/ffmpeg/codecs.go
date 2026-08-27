@@ -15,9 +15,8 @@ func CodecOptions(trackType TrackType) []string {
 			"aac",
 			"eac3",
 			"libmp3lame (MP3)",
-			"libfdk_aac (AAC)",
 			"libopus (Opus)",
-			"libflac (FLAC)",
+			"flac (FLAC)",
 			"libvorbis (Vorbis)",
 		}
 	case TrackSubtitle:
@@ -41,5 +40,21 @@ func DefaultCodec(trackType TrackType) string {
 		return "srt (SubRip)"
 	default:
 		return "copy"
+	}
+}
+
+// AudioCodecFor maps a user-facing audio format to an ffmpeg encoder name.
+// mp3 and wav are containers/formats, not encoders: mp3 encodes via
+// libmp3lame and wav via signed 16-bit PCM. flac and others use the native
+// encoder of the same name (the external libflac encoder was removed from
+// ffmpeg long ago).
+func AudioCodecFor(format string) string {
+	switch format {
+	case "mp3":
+		return "libmp3lame"
+	case "wav":
+		return "pcm_s16le"
+	default:
+		return format
 	}
 }

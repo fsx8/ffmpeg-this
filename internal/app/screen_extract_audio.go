@@ -31,9 +31,10 @@ type extractAudioWizard struct {
 	formatList list.Model
 	out        textinput.Model
 
-	mode  string // "format" | "output"
-	err   string
-	style lipgloss.Style
+	mode     string // "format" | "output"
+	err      string
+	warnPath string // output path the overwrite warning was armed for
+	style    lipgloss.Style
 }
 
 type formatItem struct{ v string }
@@ -81,10 +82,21 @@ func (m *extractAudioWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.formatList.SetSize(msg.Width-4, msg.Height-6)
 	case tea.KeyMsg:
+		typing := m.mode == "output" && textInputFocused(m.out)
 		switch msg.String() {
 		case "esc":
+			if m.mode == "output" {
+				m.mode = "format"
+				m.out.Blur()
+				m.err = ""
+				m.warnPath = ""
+				return m, nil
+			}
 			return m, pop()
 		case "q":
+			if typing {
+				break
+			}
 			return m, tea.Quit
 		case "enter":
 			if m.loading || !m.hasAudio {
@@ -110,10 +122,16 @@ func (m *extractAudioWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.err = "output file is required"
 					return m, nil
 				}
+				m.err = ""
 				outPath := outName
 				if !filepath.IsAbs(outPath) {
 					outPath = filepath.Join(filepath.Dir(m.filePath), outName)
 				}
+				if outputExists(outPath) && m.warnPath != outPath {
+					m.warnPath = outPath
+					return m, nil
+				}
+				m.warnPath = ""
 				cmd := ffx.BuildExtractAudioCmd(m.filePath, fi.v, outPath)
 				return m, push(newExecScreen(m.cfg, "Extracting audio…", execx.Cmd{Name: "ffmpeg", Args: cmd.Args}))
 			}
@@ -164,7 +182,13 @@ func (m *extractAudioWizard) View() string {
 	}
 
 	if m.mode == "output" {
-		return m.style.Render("Output file:\n\n" + m.out.View() + errLine + "\n\nEnter to run • Esc to go back")
+		warnLine := ""
+		if m.warnPath != "" {
+			warnLine = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render(
+				"Output file exists: "+m.warnPath+"\nPress Enter again to overwrite, or edit the name.",
+			)
+		}
+		return m.style.Render("Output file:\n\n" + m.out.View() + errLine + warnLine + "\n\nEnter to run • Esc to go back")
 	}
-	return m.style.Render(m.formatList.View() + "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("Enter to select format • Esc to go back"))
+	return m.style.Render(m.formatList.View() + "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("Enter to select format • Esc to go back • q to quit"))
 }

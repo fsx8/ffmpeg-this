@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -97,8 +98,16 @@ func pollExec(lineCh <-chan string, doneCh <-chan execDoneMsg) tea.Cmd {
 func (m *execModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		// Keep the scroll position across resizes instead of snapping.
+		atBottom := m.vp.AtBottom()
+		offset := m.vp.YOffset
 		m.vp = viewport.New(msg.Width-4, msg.Height-8)
 		m.vp.SetContent(m.renderLog())
+		if atBottom {
+			m.vp.GotoBottom()
+		} else {
+			m.vp.SetYOffset(offset)
+		}
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q":
@@ -134,8 +143,13 @@ func (m *execModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.lines) > m.maxLines {
 				m.lines = m.lines[len(m.lines)-m.maxLines:]
 			}
+			// Only follow the output if the user is already at the bottom,
+			// so scrolling back through the log is not fought by new lines.
+			atBottom := m.vp.AtBottom()
 			m.vp.SetContent(m.renderLog())
-			m.vp.GotoBottom()
+			if atBottom {
+				m.vp.GotoBottom()
+			}
 		}
 		return m, pollExec(m.lineCh, m.doneCh)
 	case execTickMsg:
@@ -159,15 +173,26 @@ func (m *execModel) View() string {
 		lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(m.cmd.String()) + "\n\n"
 
 	footer := ""
-	if m.running {
-		footer = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(m.spin.View()+" Running… (Esc cancels)")
-	} else if m.done != nil && m.done.err != nil {
+	switch {
+	case m.running:
+		footer = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(m.spin.View()+" Running… (Esc cancels • ↑/↓ scroll)")
+	case m.done == nil:
+		footer = ""
+	case m.done.err != nil && m.wasCancelled():
+		footer = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("Cancelled.\nEnter to go back")
+	case m.done.err != nil:
 		footer = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render("Failed: "+m.done.err.Error()+"\nEnter to go back")
-	} else {
+	default:
 		footer = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Render("Done.\nEnter to go back")
 	}
 
 	return m.style.Render(header + m.vp.View() + footer)
+}
+
+// wasCancelled distinguishes a user cancellation (context cancel kills the
+// process with a negative exit code) from a genuine command failure.
+func (m *execModel) wasCancelled() bool {
+	return errors.Is(m.done.err, context.Canceled) || m.done.exitCode < 0
 }
 
 func (m *execModel) renderLog() string {

@@ -70,8 +70,14 @@ func (m *filePickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.list.SetSize(msg.Width-4, msg.Height-6)
 	case tea.KeyMsg:
+		typingPath := m.mode == "manual" && textInputFocused(m.input)
+		filtering := m.mode == "list" && filterActive(m.list)
+
 		switch msg.String() {
 		case "esc":
+			if filtering {
+				break // let the list clear/leave its filter
+			}
 			if m.mode == "manual" {
 				m.mode = "list"
 				m.err = ""
@@ -80,8 +86,14 @@ func (m *filePickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, pop()
 		case "q":
+			if typingPath || filtering {
+				break
+			}
 			return m, tea.Quit
 		case "enter":
+			if filtering {
+				break // let the list apply the filter
+			}
 			if m.mode == "manual" {
 				p := strings.TrimSpace(m.input.Value())
 				if p == "" {
@@ -136,5 +148,5 @@ func (m *filePickerModel) View() string {
 		}
 		return m.style.Render("Enter a media file path:\n\n" + m.input.View() + errLine + "\n\nesc to go back")
 	}
-	return m.style.Render(m.list.View() + "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("Enter to select • Esc to go back • q to quit"))
+	return m.style.Render(m.list.View() + "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("Enter to select • / to filter • Esc to go back • q to quit"))
 }

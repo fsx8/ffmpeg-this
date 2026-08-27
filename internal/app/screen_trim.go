@@ -20,8 +20,10 @@ type trimWizard struct {
 	end   textinput.Model
 	out   textinput.Model
 
-	focus int
-	err   string
+	focus    int
+	err      string
+	warnPath string // output path the overwrite warning was armed for
+
 	style lipgloss.Style
 }
 
@@ -57,9 +59,9 @@ func (m *trimWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc":
+			m.warnPath = ""
+			m.err = ""
 			return m, pop()
-		case "q":
-			return m, tea.Quit
 		case "tab", "down":
 			m.focus = (m.focus + 1) % 3
 			m.updateFocus()
@@ -76,10 +78,22 @@ func (m *trimWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.err = "start, end, and output are required"
 				return m, nil
 			}
+			if err := ffx.ValidateTrim(start, end); err != nil {
+				m.err = err.Error()
+				m.warnPath = ""
+				return m, nil
+			}
+			m.err = ""
 			outPath := outName
 			if !filepath.IsAbs(outPath) {
 				outPath = filepath.Join(filepath.Dir(m.filePath), outName)
 			}
+			// -y is passed to ffmpeg; make overwriting explicit.
+			if outputExists(outPath) && m.warnPath != outPath {
+				m.warnPath = outPath
+				return m, nil
+			}
+			m.warnPath = ""
 			cmd := ffx.BuildTrimCmd(m.filePath, start, end, outPath)
 			return m, push(newExecScreen(m.cfg, "Trimming video…", execx.Cmd{Name: "ffmpeg", Args: cmd.Args}))
 		}
@@ -102,12 +116,19 @@ func (m *trimWizard) View() string {
 	if m.err != "" {
 		errLine = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(m.err)
 	}
+	warnLine := ""
+	if m.warnPath != "" {
+		warnLine = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render(
+			"Output file exists: "+m.warnPath+"\nPress Enter again to overwrite, or edit the name.",
+		)
+	}
 	s := "Trim Video (lossless)\n\n" +
 		"Start time:\n" + m.start.View() + "\n\n" +
 		"End time:\n" + m.end.View() + "\n\n" +
 		"Output file:\n" + m.out.View() + "\n" +
-		errLine + "\n\n" +
-		lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("Tab to switch • Enter to run • Esc to go back")
+		errLine + warnLine + "\n\n" +
+		lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(
+			"Tab to switch fields • Enter to run • Esc to go back\nNote: -c copy cuts on keyframes; the cut may differ slightly from the times you enter.")
 	return m.style.Render(s)
 }
 

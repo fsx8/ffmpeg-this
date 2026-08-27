@@ -31,6 +31,23 @@ func effectiveVersion() string {
 	return version
 }
 
+// openLogFile creates ffmpeg_log.txt in the working directory, falling back
+// to a unique file in the system temp dir when the CWD is not writable
+// (read-only mounts, owned directories, …). Returns nil if logging is
+// impossible; a missing log must never keep the app from starting.
+func openLogFile() *os.File {
+	f, err := os.Create("ffmpeg_log.txt")
+	if err == nil {
+		return f
+	}
+	f, err = os.CreateTemp("", "ffwiz-ffmpeg_log-*.txt")
+	if err != nil {
+		return nil
+	}
+	fmt.Fprintln(os.Stderr, "note: working directory not writable; logging to", f.Name())
+	return f
+}
+
 func main() {
 	var initialPath string
 	var showVersion bool
@@ -51,13 +68,11 @@ func main() {
 		initialPath = flag.Arg(0)
 	}
 
-	logFile, err := os.Create("ffmpeg_log.txt")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "failed to create ffmpeg_log.txt:", err)
-		os.Exit(1)
+	var logger *log.Logger
+	if logFile := openLogFile(); logFile != nil {
+		defer logFile.Close()
+		logger = log.New(logFile, "", log.LstdFlags)
 	}
-	defer logFile.Close()
-	logger := log.New(logFile, "", log.LstdFlags)
 
 	runner := execx.New()
 	prober := ffprobe.New(runner)
@@ -72,6 +87,10 @@ func main() {
 		p, err := filepath.Abs(initialPath)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "invalid path:", err)
+			os.Exit(1)
+		}
+		if _, err := os.Stat(p); err != nil {
+			fmt.Fprintln(os.Stderr, "error: path does not exist:", p)
 			os.Exit(1)
 		}
 		absInitial = p

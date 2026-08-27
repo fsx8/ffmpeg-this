@@ -36,6 +36,7 @@ func New() Runner { return runner{} }
 
 func (runner) Run(ctx context.Context, cmd Cmd) (string, string, error) {
 	c := exec.CommandContext(ctx, cmd.Name, cmd.Args...)
+	setProcessGroup(c)
 	var outBuf, errBuf bytes.Buffer
 	c.Stdout = &outBuf
 	c.Stderr = &errBuf
@@ -45,6 +46,7 @@ func (runner) Run(ctx context.Context, cmd Cmd) (string, string, error) {
 
 func (runner) RunStreaming(ctx context.Context, cmd Cmd, onStderr func(line string)) (int, error) {
 	c := exec.CommandContext(ctx, cmd.Name, cmd.Args...)
+	setProcessGroup(c)
 	stdout, err := c.StdoutPipe()
 	if err != nil {
 		return 0, err
@@ -89,8 +91,11 @@ func (runner) RunStreaming(ctx context.Context, cmd Cmd, onStderr func(line stri
 		}
 	}()
 
-	waitErr := c.Wait()
+	// Drain both pipes before calling Wait: Wait closes them, and reads
+	// racing with the close can lose the tail of the output (see os/exec
+	// StderrPipe docs). The readers see EOF once the process exits.
 	wg.Wait()
+	waitErr := c.Wait()
 	if waitErr != nil {
 		var ee *exec.ExitError
 		if errors.As(waitErr, &ee) {
