@@ -15,8 +15,11 @@ func TrimOutputName(inputPath string) string {
 func BuildTrimCmd(inputPath, start, end, outputPath string) Cmd {
 	// -ss/-to are output options: input-side -to requires ffmpeg >= 5.0
 	// (e.g. Ubuntu 22.04 ships 4.x), so seek on the output side instead.
+	// -map 0 keeps every input stream: with plain -c copy ffmpeg's
+	// automatic selection would retain only the "best" stream of each
+	// type, silently dropping the rest of a multi-track file.
 	return Cmd{
-		Args: []string{"-i", inputPath, "-ss", start, "-to", end, "-c", "copy", "-y", outputPath},
+		Args: []string{"-i", inputPath, "-map", "0", "-ss", start, "-to", end, "-c", "copy", "-y", outputPath},
 	}
 }
 

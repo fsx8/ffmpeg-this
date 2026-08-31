@@ -102,7 +102,9 @@ func (t *ProgressTracker) Observe(line string) (ProgressSample, bool) {
 	if s.Frame > t.cur.Frame {
 		t.cur.Frame = s.Frame
 	}
-	if s.FPS > t.cur.FPS {
+	if s.FPS > 0 {
+		// Latest reported fps wins: the value fluctuates while encoding,
+		// so a running maximum would be meaningless.
 		t.cur.FPS = s.FPS
 	}
 	if s.OutTime > t.cur.OutTime {

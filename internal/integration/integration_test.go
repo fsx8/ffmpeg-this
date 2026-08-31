@@ -241,6 +241,43 @@ func TestTrimMidGOPSnapsToPreviousKeyframe(t *testing.T) {
 	}
 }
 
+// -map 0 must preserve every stream of a multi-track file through a
+// lossless cut: before the fix, ffmpeg's automatic selection silently
+// kept only the "best" video + audio + subtitle of hdr4k.mkv's 8 streams.
+func TestTrimKeepsAllStreams(t *testing.T) {
+	requireTools(t)
+	out := filepath.Join(t.TempDir(), "trimmed.mkv")
+	cmd := ffx.BuildTrimCmd(fx(t, "hdr4k.mkv"), "00:00:00", "00:00:02", out)
+	runFFmpeg(t, 3*time.Minute, cmd.Args)
+
+	res := probeFile(t, out)
+	if got := len(streamsOfType(res, "video")); got != 1 {
+		t.Fatalf("want 1 video stream, got %d", got)
+	}
+	if v := firstStream(t, res, "video"); v.CodecName != "hevc" || v.PixFmt != "yuv420p10le" {
+		t.Fatalf("trim must stream-copy the video, got %s %s", v.CodecName, v.PixFmt)
+	}
+	audios := streamsOfType(res, "audio")
+	if len(audios) != 3 {
+		t.Fatalf("want 3 audio streams, got %d", len(audios))
+	}
+	for i, want := range []string{"dts", "eac3", "aac"} {
+		if audios[i].CodecName != want {
+			t.Fatalf("audio %d = %s, want %s (lossless copy)", i, audios[i].CodecName, want)
+		}
+	}
+	subs := streamsOfType(res, "subtitle")
+	if len(subs) != 4 {
+		t.Fatalf("want 4 subtitle streams, got %d", len(subs))
+	}
+	for i, want := range []string{"subrip", "subrip", "subrip", "ass"} {
+		if subs[i].CodecName != want {
+			t.Fatalf("subtitle %d = %s, want %s (lossless copy)", i, subs[i].CodecName, want)
+		}
+	}
+	assertDuration(t, res, 2, 0.5)
+}
+
 func TestKeyframesProbeMatchesFixtureGOP(t *testing.T) {
 	requireTools(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -522,10 +559,24 @@ func TestInteractiveConvertSubtitleToMovText(t *testing.T) {
 	}
 }
 
+func batchInfoFromProbe(t *testing.T, path string) ffx.BatchStreamInfo {
+	t.Helper()
+	res := probeFile(t, path)
+	var info ffx.BatchStreamInfo
+	for _, s := range res.StreamsOfType("audio") {
+		info.AudioCodecs = append(info.AudioCodecs, s.CodecName)
+	}
+	for _, s := range res.StreamsOfType("subtitle") {
+		info.SubtitleCodecs = append(info.SubtitleCodecs, s.CodecName)
+	}
+	return info
+}
+
 func TestBatchConvertStreamCopy(t *testing.T) {
 	requireTools(t)
+	in := fx(t, "basic.mp4")
 	out := filepath.Join(t.TempDir(), "copy_batch.mkv")
-	cmd := ffx.BuildBatchConvertCmd(fx(t, "basic.mp4"), out, "mkv", ffx.QualitySame, true)
+	cmd := ffx.BuildBatchConvertCmd(in, out, "mkv", ffx.QualitySame, true, batchInfoFromProbe(t, in))
 	runFFmpeg(t, 2*time.Minute, cmd.Args)
 
 	res := probeFile(t, out)
@@ -538,10 +589,98 @@ func TestBatchConvertStreamCopy(t *testing.T) {
 	}
 }
 
+// A same-container batch copy must keep EVERY stream: with the old plain
+// -c copy, ffmpeg's automatic selection silently dropped 5 of hdr4k.mkv's
+// 8 streams (exit 0).
+func TestBatchCopyKeepsAllStreams(t *testing.T) {
+	requireTools(t)
+	in := fx(t, "hdr4k.mkv")
+	out := filepath.Join(t.TempDir(), "hdr4k_batch.mkv")
+	cmd := ffx.BuildBatchConvertCmd(in, out, "mkv", ffx.QualitySame, true, batchInfoFromProbe(t, in))
+	runFFmpeg(t, 2*time.Minute, cmd.Args)
+
+	res := probeFile(t, out)
+	if got := len(streamsOfType(res, "video")); got != 1 {
+		t.Fatalf("want 1 video stream, got %d", got)
+	}
+	audios := streamsOfType(res, "audio")
+	if len(audios) != 3 {
+		t.Fatalf("want 3 audio streams, got %d", len(audios))
+	}
+	for i, want := range []string{"dts", "eac3", "aac"} {
+		if audios[i].CodecName != want {
+			t.Fatalf("audio %d = %s, want %s (lossless copy)", i, audios[i].CodecName, want)
+		}
+	}
+	subs := streamsOfType(res, "subtitle")
+	if len(subs) != 4 {
+		t.Fatalf("want 4 subtitle streams, got %d", len(subs))
+	}
+	for i, want := range []string{"subrip", "subrip", "subrip", "ass"} {
+		if subs[i].CodecName != want {
+			t.Fatalf("subtitle %d = %s, want %s (lossless copy)", i, subs[i].CodecName, want)
+		}
+	}
+}
+
+// A cross-container copy must never silently drop streams and never die
+// at the muxer: DTS becomes AAC, the muxable EAC3/AAC layers are copied,
+// and the text subtitles convert to mov_text.
+func TestBatchCopyToMP4NormalizesStreams(t *testing.T) {
+	requireTools(t)
+	in := fx(t, "hdr4k.mkv")
+	out := filepath.Join(t.TempDir(), "hdr4k_batch.mp4")
+	cmd := ffx.BuildBatchConvertCmd(in, out, "mp4", ffx.QualitySame, true, batchInfoFromProbe(t, in))
+	runFFmpeg(t, 2*time.Minute, cmd.Args)
+
+	res := probeFile(t, out)
+	if v := firstStream(t, res, "video"); v.CodecName != "hevc" {
+		t.Fatalf("video must be stream-copied, got %s", v.CodecName)
+	}
+	audios := streamsOfType(res, "audio")
+	if len(audios) != 3 {
+		t.Fatalf("copy must not silently drop audio layers, got %d", len(audios))
+	}
+	if audios[0].CodecName != "aac" {
+		t.Fatalf("DTS must become aac for mp4, got %s", audios[0].CodecName)
+	}
+	if audios[1].CodecName != "eac3" || audios[2].CodecName != "aac" {
+		t.Fatalf("muxable audio must be stream-copied, got %s/%s", audios[1].CodecName, audios[2].CodecName)
+	}
+	subs := streamsOfType(res, "subtitle")
+	if len(subs) != 4 {
+		t.Fatalf("all text subtitles must survive, got %d", len(subs))
+	}
+	for i, s := range subs {
+		if s.CodecName != "mov_text" {
+			t.Fatalf("subtitle %d = %s, want mov_text", i, s.CodecName)
+		}
+	}
+}
+
+// The avi copy preset re-encodes instead of building a command that dies
+// at the avi muxer (no subtitles, restrictive codec tags).
+func TestBatchCopyToAVIReencodes(t *testing.T) {
+	requireTools(t)
+	in := fx(t, "mpeg4.avi")
+	out := filepath.Join(t.TempDir(), "mpeg4_batch.avi")
+	cmd := ffx.BuildBatchConvertCmd(in, out, "avi", ffx.QualitySame, true, batchInfoFromProbe(t, in))
+	runFFmpeg(t, 3*time.Minute, cmd.Args)
+
+	res := probeFile(t, out)
+	if v := firstStream(t, res, "video"); v.CodecName != "h264" {
+		t.Fatalf("avi copy preset must re-encode video to h264, got %s", v.CodecName)
+	}
+	if a := firstStream(t, res, "audio"); a.CodecName != "mp3" {
+		t.Fatalf("avi copy preset must re-encode audio to mp3, got %s", a.CodecName)
+	}
+	assertDuration(t, res, 4, 1)
+}
+
 func TestBatchConvertWebmReencodesToVP9(t *testing.T) {
 	requireTools(t)
 	out := filepath.Join(t.TempDir(), "noaudio_batch.webm")
-	cmd := ffx.BuildBatchConvertCmd(fx(t, "noaudio.mp4"), out, "webm", ffx.QualityLow, false)
+	cmd := ffx.BuildBatchConvertCmd(fx(t, "noaudio.mp4"), out, "webm", ffx.QualityLow, false, ffx.BatchStreamInfo{})
 	runFFmpeg(t, 3*time.Minute, cmd.Args)
 
 	res := probeFile(t, out)
@@ -550,6 +689,44 @@ func TestBatchConvertWebmReencodesToVP9(t *testing.T) {
 	}
 	if got := len(streamsOfType(res, "audio")); got != 0 {
 		t.Fatalf("-an expected for audio-less input, got %d audio streams", got)
+	}
+}
+
+// Audio-only batch targets must drop the video and land on the right
+// codec: mp3 (libmp3lame) and flac (native), keeping the source duration.
+func TestBatchConvertAudioTargets(t *testing.T) {
+	requireTools(t)
+	cases := map[string]string{"mp3": "mp3", "flac": "flac"}
+	for format, codec := range cases {
+		t.Run(format, func(t *testing.T) {
+			out := filepath.Join(t.TempDir(), "audio_batch."+format)
+			cmd := ffx.BuildBatchConvertCmd(fx(t, "basic.mp4"), out, format, ffx.QualitySame, true, ffx.BatchStreamInfo{})
+			runFFmpeg(t, 2*time.Minute, cmd.Args)
+
+			res := probeFile(t, out)
+			if got := len(streamsOfType(res, "video")); got != 0 {
+				t.Fatalf("audio target must have no video stream, got %d", got)
+			}
+			if a := firstStream(t, res, "audio"); a.CodecName != codec {
+				t.Fatalf("audio codec = %s, want %s", a.CodecName, codec)
+			}
+			assertDuration(t, res, 20, 1)
+		})
+	}
+}
+
+// HEVC stream-copied into the mp4 family must carry the hvc1 tag (Apple
+// devices reject the default hev1 spelling): the tracks/remux path sets
+// -tag:v hvc1 for kept HEVC video, so the tag must survive to the muxer.
+func TestRemuxKeptHEVCIntoMP4CarriesHVCTag(t *testing.T) {
+	requireTools(t)
+	res := runRemux(t, fx(t, "hdr4k.mkv"), filepath.Join(t.TempDir(), "out.mp4"), nil)
+	v := firstStream(t, res, "video")
+	if v.CodecName != "hevc" {
+		t.Fatalf("hevc must copy into mp4, got %s", v.CodecName)
+	}
+	if v.CodecTagString != "hvc1" {
+		t.Fatalf("codec_tag_string = %q, want hvc1 (Apple-compatible HEVC tag)", v.CodecTagString)
 	}
 }
 

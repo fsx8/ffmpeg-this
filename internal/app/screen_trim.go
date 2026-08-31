@@ -18,6 +18,7 @@ import (
 
 type trimKeyframesMsg struct {
 	keyframes []float64
+	dur       float64 // container duration in seconds; 0 when unknown
 	err       error
 }
 
@@ -35,31 +36,24 @@ type trimWizard struct {
 	end   textinput.Model
 	out   textinput.Model
 
-	focus    int
-	err      string
-	warnPath string // output path the overwrite warning was armed for
+	focus int
+	err   string
+	guard overwriteGuard
 
-	step    string // "form" | "snapping"
-	spin    spinner.Model
-	pending trimPending
+	step        string // "form" | "snapping"
+	spin        spinner.Model
+	pending     trimPending
+	probeCancel context.CancelFunc // cancels the in-flight keyframe probe on Esc
 
 	style lipgloss.Style
 }
 
 func newTrimWizard(cfg Config, filePath string) *trimWizard {
-	makeInput := func(ph string) textinput.Model {
-		ti := textinput.New()
-		ti.Placeholder = ph
-		ti.Prompt = "> "
-		ti.CharLimit = 64
-		ti.Width = 30
-		return ti
-	}
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
-	start := makeInput("HH:MM:SS or seconds")
-	end := makeInput("HH:MM:SS or seconds")
-	out := makeInput(ffx.TrimOutputName(filePath))
+	start := newShortInput("HH:MM:SS or seconds")
+	end := newShortInput("HH:MM:SS or seconds")
+	out := newPathInput()
 	out.SetValue(ffx.TrimOutputName(filePath))
 	start.Focus()
 	return &trimWizard{
@@ -80,28 +74,44 @@ func (m *trimWizard) Init() tea.Cmd { return textinput.Blink }
 func (m *trimWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case trimKeyframesMsg:
+		// The probe kept running while the user backed out; its result is
+		// stale and must not launch a cancelled trim (or attach to pending
+		// values the user has since changed).
+		if m.step != "snapping" {
+			return m, nil
+		}
 		return m.startTrim(msg)
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc":
 			if m.step == "snapping" {
+				if m.probeCancel != nil {
+					m.probeCancel()
+					m.probeCancel = nil
+				}
 				m.step = "form"
 				return m, textinput.Blink
 			}
-			m.warnPath = ""
+			m.guard.armedFor = ""
 			m.err = ""
 			return m, pop()
+		case "ctrl+c":
+			if m.probeCancel != nil {
+				m.probeCancel()
+				m.probeCancel = nil
+			}
+			return m, tea.Quit
 		}
 		if m.step != "form" {
 			return m, nil
 		}
 		switch msg.String() {
 		case "tab", "down":
-			m.focus = (m.focus + 1) % 3
+			m.focus = focusStep(m.focus, 3, 1)
 			m.updateFocus()
 			return m, textinput.Blink
 		case "shift+tab", "up":
-			m.focus = (m.focus + 2) % 3
+			m.focus = focusStep(m.focus, 3, -1)
 			m.updateFocus()
 			return m, textinput.Blink
 		case "enter":
@@ -114,20 +124,15 @@ func (m *trimWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if err := ffx.ValidateTrim(start, end); err != nil {
 				m.err = err.Error()
-				m.warnPath = ""
+				m.guard.armedFor = ""
 				return m, nil
 			}
 			m.err = ""
-			outPath := outName
-			if !filepath.IsAbs(outPath) {
-				outPath = filepath.Join(filepath.Dir(m.filePath), outName)
-			}
+			outPath := resolveOutputPath(filepath.Dir(m.filePath), outName)
 			// -y is passed to ffmpeg; make overwriting explicit.
-			if outputExists(outPath) && m.warnPath != outPath {
-				m.warnPath = outPath
+			if m.guard.shouldWarn(outPath) {
 				return m, nil
 			}
-			m.warnPath = ""
 			startSec, _ := ffx.ParseTimeSpec(start)
 			endSec, _ := ffx.ParseTimeSpec(end)
 			m.pending = trimPending{startSec: startSec, endSec: endSec, outPath: outPath}
@@ -157,17 +162,35 @@ func (m *trimWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// probeKeyframesCmd fetches the keyframe list (for lossless snapping) and,
+// independently, the container duration so a start beyond EOF can be
+// rejected before ffmpeg runs. A keyframe failure must not disable the
+// duration check, so both results travel in one message. The parent
+// context is created before the command is returned and stored as
+// m.probeCancel, so Esc aborts both probes instead of letting them run to
+// completion behind a backed-out screen.
 func (m *trimWizard) probeKeyframesCmd() tea.Cmd {
 	prober := m.cfg.Prober
 	path := m.filePath
 	if prober == nil {
 		return func() tea.Msg { return trimKeyframesMsg{} }
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	m.probeCancel = cancel
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		kf, err := prober.Keyframes(ctx, path)
-		return trimKeyframesMsg{keyframes: kf, err: err}
+		msg := trimKeyframesMsg{}
+		kfCtx, kfCancel := context.WithTimeout(ctx, probeTimeout)
+		kf, err := prober.Keyframes(kfCtx, path)
+		kfCancel()
+		msg.keyframes, msg.err = kf, err
+
+		probeCtx, probeCancel := context.WithTimeout(ctx, probeTimeout)
+		defer probeCancel()
+		if res, err := prober.Probe(probeCtx, path); err == nil && res != nil {
+			msg.dur, _ = res.Duration()
+		}
+		return msg
 	}
 }
 
@@ -176,7 +199,22 @@ func (m *trimWizard) probeKeyframesCmd() tea.Cmd {
 // the legacy behavior — rather than blocking the user.
 func (m *trimWizard) startTrim(msg trimKeyframesMsg) (tea.Model, tea.Cmd) {
 	p := m.pending
+	if msg.dur > 0 && p.startSec >= msg.dur-0.05 {
+		m.step = "form"
+		m.err = fmt.Sprintf("start %s is at or after the end of the file (%s) — nothing to cut",
+			ffx.FormatTimeSpec(p.startSec), formatDur(time.Duration(msg.dur*float64(time.Second))))
+		return m, nil
+	}
 	snapped := ffx.SnapToKeyframe(p.startSec, msg.keyframes)
+	// Snapping can move the start forward (when it precedes the first
+	// keyframe). Refuse cuts that would end up empty instead of handing
+	// ffmpeg a start beyond its end.
+	if snapped >= p.endSec {
+		m.step = "form"
+		m.err = fmt.Sprintf("keyframe snapping moves the cut start to %s, which is not before the end %s — choose a later end time",
+			ffx.FormatTimeSpec(snapped), ffx.FormatTimeSpec(p.endSec))
+		return m, nil
+	}
 	title := "Trimming video…"
 	if snapped < p.startSec-0.05 {
 		title = fmt.Sprintf("Trimming video… (lossless cut starts at %s)", ffx.FormatTimeSpec(snapped))
@@ -195,23 +233,15 @@ func (m *trimWizard) View() string {
 			m.spin.View() + " Finding keyframes for a lossless cut…\n\n" +
 			lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("Esc to go back"))
 	}
-	errLine := ""
-	if m.err != "" {
-		errLine = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(m.err)
-	}
-	warnLine := ""
-	if m.warnPath != "" {
-		warnLine = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render(
-			"Output file exists: "+m.warnPath+"\nPress Enter again to overwrite, or edit the name.",
-		)
-	}
+	errLine := renderErrLine(m.err)
+	warnLine := renderWarnLine(m.guard)
 	s := "Trim Video (lossless)\n\n" +
 		"Start time:\n" + m.start.View() + "\n\n" +
 		"End time:\n" + m.end.View() + "\n\n" +
 		"Output file:\n" + m.out.View() + "\n" +
 		errLine + warnLine + "\n\n" +
 		lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(
-			"Tab to switch fields • Enter to run • Esc to go back\nNote: with -c copy the start is snapped to the previous keyframe, so the\ncut may begin slightly earlier than requested (lossless, audio in sync).")
+			"Tab to switch fields • Enter to run • Esc to go back • Ctrl+C to quit\nNote: with -c copy the start is snapped to the previous keyframe, so the\ncut may begin slightly earlier than requested (lossless, audio in sync).")
 	return m.style.Render(s)
 }
 

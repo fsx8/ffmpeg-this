@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -33,14 +35,6 @@ type trackView struct {
 	Title      string
 }
 
-type codecChoice struct {
-	label string
-}
-
-func (c codecChoice) Title() string       { return c.label }
-func (c codecChoice) Description() string { return "" }
-func (c codecChoice) FilterValue() string { return c.label }
-
 type tracksWizard struct {
 	cfg      Config
 	filePath string
@@ -57,6 +51,8 @@ type tracksWizard struct {
 
 	codecList list.Model
 	out       textinput.Model
+	guard     overwriteGuard
+	vp        viewport.Model // scrolls the track list; keys stay with Update
 
 	style lipgloss.Style
 	w, h  int
@@ -66,10 +62,7 @@ func newTracksWizard(cfg Config, filePath string) *tracksWizard {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 
-	out := textinput.New()
-	out.Prompt = "> "
-	out.CharLimit = 4096
-	out.Width = 50
+	out := newPathInput()
 
 	return &tracksWizard{
 		cfg:      cfg,
@@ -85,7 +78,12 @@ func newTracksWizard(cfg Config, filePath string) *tracksWizard {
 
 func (m *tracksWizard) Init() tea.Cmd {
 	return tea.Batch(m.spin.Tick, func() tea.Msg {
-		res, err := m.cfg.Prober.Probe(context.Background(), m.filePath)
+		if m.cfg.Prober == nil {
+			return tracksDoneMsg{err: errors.New("ffprobe unavailable")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+		defer cancel()
+		res, err := m.cfg.Prober.Probe(ctx, m.filePath)
 		if err != nil {
 			return tracksDoneMsg{err: err}
 		}
@@ -106,8 +104,9 @@ func (m *tracksWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
 		if m.step == "codec" {
-			m.codecList.SetSize(msg.Width-4, msg.Height-6)
+			m.codecList.SetSize(dim(msg.Width, 4), dim(msg.Height, 6))
 		}
+		m.resizeViewport()
 	case tea.KeyMsg:
 		typing := m.step == "output" && textInputFocused(m.out)
 		switch msg.String() {
@@ -117,11 +116,24 @@ func (m *tracksWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		case "esc":
+			// Esc walks exactly one step back along the flow
+			// (tracks -> output -> confirm; codec branches off tracks).
 			switch m.step {
-			case "codec", "output", "confirm":
-				m.step = "tracks"
-				m.codecList = list.Model{}
+			case "confirm":
+				m.guard.armedFor = ""
+				m.err = ""
+				m.step = "output"
+				m.out.Focus()
+				return m, textinput.Blink
+			case "output":
+				m.guard.armedFor = ""
+				m.err = ""
 				m.out.Blur()
+				m.step = "tracks"
+				return m, nil
+			case "codec":
+				m.err = ""
+				m.step = "tracks"
 				return m, nil
 			default:
 				return m, pop()
@@ -160,8 +172,8 @@ func (m *tracksWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.codecList, cmd = m.codecList.Update(msg)
 		if km, ok := msg.(tea.KeyMsg); ok && km.String() == "enter" {
-			if ch, ok := m.codecList.SelectedItem().(codecChoice); ok {
-				m.actions[m.cursor] = ffx.TrackActionInfo{Action: ffx.ActionConvert, Codec: ch.label}
+			if ch, ok := m.codecList.SelectedItem().(simpleItem); ok {
+				m.actions[m.cursor] = ffx.TrackActionInfo{Action: ffx.ActionConvert, Codec: ch.value}
 				m.step = "tracks"
 				return m, nil
 			}
@@ -186,6 +198,10 @@ func (m *tracksWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch km.String() {
 			case "y", "enter":
 				outPath := m.outputPath()
+				// -y is passed to ffmpeg; make overwriting explicit.
+				if m.guard.shouldWarn(outPath) {
+					return m, nil
+				}
 				tracks := make([]ffx.Track, 0, len(m.tracks))
 				for _, tv := range m.tracks {
 					tracks = append(tracks, tv.Track)
@@ -198,6 +214,7 @@ func (m *tracksWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, push(newExecScreen(m.cfg, "Converting…", execx.Cmd{Name: "ffmpeg", Args: cmd.Args}))
 			case "n":
+				m.guard.armedFor = ""
 				m.step = "tracks"
 				return m, nil
 			}
@@ -209,6 +226,11 @@ func (m *tracksWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *tracksWizard) updateTracksStep(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// A failed probe leaves the track list empty; every key must be a no-op
+	// (previously "c" indexed the empty slice and crashed the app).
+	if len(m.tracks) == 0 {
+		return m, nil
+	}
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -233,14 +255,14 @@ func (m *tracksWizard) updateTracksStep(msg tea.Msg) (tea.Model, tea.Cmd) {
 			opts := ffx.CodecOptions(tt)
 			items := make([]list.Item, 0, len(opts))
 			for _, o := range opts {
-				items = append(items, codecChoice{label: o})
+				items = append(items, simpleItem{value: o})
 			}
 			l := list.New(items, list.NewDefaultDelegate(), 0, 0)
 			l.Title = "Select codec (" + string(tt) + ")"
 			l.SetFilteringEnabled(false)
 			l.DisableQuitKeybindings()
 			if m.w > 0 && m.h > 0 {
-				l.SetSize(m.w-4, m.h-6)
+				l.SetSize(dim(m.w, 4), dim(m.h, 6))
 			}
 			m.codecList = l
 			m.step = "codec"
@@ -257,6 +279,29 @@ func (m *tracksWizard) updateTracksStep(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// resizeViewport adapts the track-list viewport to the terminal. The
+// chrome around the list is the title block, the blank separator, and the
+// help/error lines, plus the view padding.
+func (m *tracksWizard) resizeViewport() {
+	m.vp.Width = dim(m.w, 4)
+	m.vp.Height = dim(m.h, 8)
+}
+
+// followCursor scrolls the viewport so the cursor's track line stays
+// visible. Must run after SetContent: SetYOffset clamps against the
+// content length, and KeyMsgs are never forwarded to the viewport, so
+// this manual adjustment is the only scrolling trigger.
+func (m *tracksWizard) followCursor() {
+	if m.vp.Height <= 0 {
+		return
+	}
+	if m.cursor < m.vp.YOffset {
+		m.vp.SetYOffset(m.cursor)
+	} else if m.cursor >= m.vp.YOffset+m.vp.Height {
+		m.vp.SetYOffset(m.cursor - m.vp.Height + 1)
+	}
+}
+
 func (m *tracksWizard) View() string {
 	if m.loading {
 		return m.style.Render(m.spin.View() + " Analyzing tracks…\n\nEsc to go back")
@@ -264,25 +309,15 @@ func (m *tracksWizard) View() string {
 
 	switch m.step {
 	case "codec":
-		return m.style.Render(m.codecList.View() + "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("Enter to select • Esc to go back"))
+		return m.style.Render(m.codecList.View() + "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("Enter to select • Esc to go back • q to quit"))
 	case "output":
-		errLine := ""
-		if m.err != "" {
-			errLine = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(m.err)
-		}
-		return m.style.Render("Output file:\n\n" + m.out.View() + errLine + "\n\nEnter to continue • Esc to go back")
+		errLine := renderErrLine(m.err)
+		return m.style.Render("Output file:\n\n" + m.out.View() + errLine + "\n\nEnter to continue • Esc to go back • q to quit")
 	case "confirm":
 		cmdStr := m.previewCommand()
-		errLine := ""
-		if m.err != "" {
-			errLine = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(m.err)
-		}
-		warnLine := ""
-		if outputExists(m.outputPath()) {
-			warnLine = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render(
-				"Output file exists: "+m.outputPath()+" — it will be overwritten.")
-		}
-		return m.style.Render("Generated command:\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(cmdStr) + errLine + warnLine + "\n\nEnter/Y to run • N to cancel • Esc to go back")
+		errLine := renderErrLine(m.err)
+		warnLine := renderWarnLine(m.guard)
+		return m.style.Render("Generated command:\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(cmdStr) + errLine + warnLine + "\n\nEnter/Y to run • N to cancel • Esc to go back • q to quit")
 	default:
 		return m.style.Render(m.tracksView())
 	}
@@ -290,14 +325,10 @@ func (m *tracksWizard) View() string {
 
 func (m *tracksWizard) tracksView() string {
 	title := lipgloss.NewStyle().Bold(true).Render("Interactive Modify Tracks") + "\n\n"
-	help := lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("↑/↓ navigate • r remove • k keep • c convert • Enter continue • Esc back")
-	errLine := ""
-	if m.err != "" {
-		errLine = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(m.err)
-	}
+	help := lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("↑/↓ navigate • r remove • k keep • c convert • Enter continue • Esc back • q to quit")
+	errLine := renderErrLine(m.err)
 
 	var sb strings.Builder
-	sb.WriteString(title)
 	for i, tv := range m.tracks {
 		prefix := "  "
 		if i == m.cursor {
@@ -314,8 +345,12 @@ func (m *tracksWizard) tracksView() string {
 		}
 		sb.WriteString(line + "\n")
 	}
-	sb.WriteString("\n" + help + errLine)
-	return sb.String()
+	// SetContent preserves the offset; followCursor then keeps the
+	// cursor's line in view (and scrolls only when the cursor moved or
+	// the viewport was resized).
+	m.vp.SetContent(sb.String())
+	m.followCursor()
+	return title + m.vp.View() + "\n" + help + errLine
 }
 
 func tracksFromProbe(res *ffprobe.ProbeResult) []trackView {
@@ -327,6 +362,11 @@ func tracksFromProbe(res *ffprobe.ProbeResult) []trackView {
 		switch s.CodecType {
 		case "video", "audio", "subtitle":
 		default:
+			continue
+		}
+		// Embedded cover art shows up as an mjpeg "video" stream; offering
+		// keep/remove/convert on it is confusing, so skip it.
+		if s.CodecType == "video" && s.IsAttachedPic() {
 			continue
 		}
 		tv := trackView{
@@ -384,10 +424,7 @@ func (m *tracksWizard) outputPath() string {
 	if outName == "" {
 		outName = defaultModifiedName(m.filePath)
 	}
-	if filepath.IsAbs(outName) {
-		return outName
-	}
-	return filepath.Join(filepath.Dir(m.filePath), outName)
+	return resolveOutputPath(filepath.Dir(m.filePath), outName)
 }
 
 func (m *tracksWizard) previewCommand() string {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -136,7 +138,7 @@ func (m *execModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Keep the scroll position across resizes instead of snapping.
 		atBottom := m.vp.AtBottom()
 		offset := m.vp.YOffset
-		m.vp = viewport.New(msg.Width-4, msg.Height-9)
+		m.vp = viewport.New(dim(msg.Width, 4), dim(msg.Height, 9))
 		m.vp.SetContent(m.renderLog())
 		if atBottom {
 			m.vp.GotoBottom()
@@ -225,15 +227,15 @@ func (m *execModel) View() string {
 	footer := ""
 	switch {
 	case m.running:
-		footer = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(m.spin.View()+" Running… (Esc cancels • ↑/↓ scroll)")
+		footer = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(m.spin.View()+" Running… (Esc cancels • ↑/↓ scroll • q quits)")
 	case m.done == nil:
 		footer = ""
 	case m.done.err != nil && m.wasCancelled():
-		footer = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("Cancelled.\nEnter to go back")
+		footer = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("Cancelled.\nEnter to go back • q to quit")
 	case m.done.err != nil:
-		footer = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render("Failed: "+m.done.err.Error()+"\nEnter to go back")
+		footer = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render("Failed: "+m.done.err.Error()+"\nEnter to go back • q to quit")
 	default:
-		footer = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Render("Done.\nEnter to go back")
+		footer = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Render("Done.\nEnter to go back • q to quit")
 	}
 
 	return m.style.Render(header + m.vp.View() + footer)
@@ -295,10 +297,40 @@ func (m *execModel) renderLog() string {
 	return out
 }
 
-// execTotalDuration sums the probed durations of every `-i` input; concat-style
-// outputs (join) then match exactly and single-input commands trivially. Zero
-// means unknown — the UI falls back to an indeterminate indicator.
+// speedFactorFromArgs detects a setpts=PTS/<factor> video filter and
+// returns the playback speed factor (1.0 when the command leaves speed
+// unchanged). ffmpeg's -progress out_time tracks *output* timestamps, so a
+// 2x sped-up encode only ever reaches half the input duration; the caller
+// divides the expected total accordingly.
+func speedFactorFromArgs(args []string) float64 {
+	const prefix = "setpts=PTS/"
+	for _, a := range args {
+		i := strings.Index(a, prefix)
+		if i < 0 {
+			continue
+		}
+		rest := a[i+len(prefix):]
+		if end := strings.IndexAny(rest, "[];,"); end >= 0 {
+			rest = rest[:end]
+		}
+		if f, err := strconv.ParseFloat(rest, 64); err == nil && f > 0 {
+			return f
+		}
+	}
+	return 1
+}
+
+// execTotalDuration derives the expected output length for the progress
+// bar. It sums the probed durations of every `-i` input, which matches
+// concat-style outputs (join) exactly and single-input full conversions
+// trivially. Output-side -ss/-to (trim) constrain the produced range while
+// ffmpeg's out_time counts from the seek point, so the cut length is used
+// instead. Zero means unknown — the UI falls back to an indeterminate
+// indicator.
 func execTotalDuration(ctx context.Context, prober ffprobe.Prober, args []string) time.Duration {
+	if prober == nil {
+		return 0
+	}
 	var total time.Duration
 	for i, a := range args {
 		if a != "-i" || i+1 >= len(args) {
@@ -312,5 +344,53 @@ func execTotalDuration(ctx context.Context, prober ffprobe.Prober, args []string
 			total += d
 		}
 	}
+
+	total = applySpeedFactor(args, total)
+
+	if start, ok := timeFlagSeconds(args, "-ss"); ok {
+		startDur := time.Duration(start * float64(time.Second))
+		if end, ok := timeFlagSeconds(args, "-to"); ok {
+			if end > start {
+				return time.Duration((end - start) * float64(time.Second))
+			}
+			return 0
+		}
+		if startDur < total {
+			return total - startDur
+		}
+		return 0
+	}
+	if end, ok := timeFlagSeconds(args, "-to"); ok {
+		return time.Duration(end * float64(time.Second))
+	}
 	return total
+}
+
+// applySpeedFactor divides the expected total by the setpts speed factor so
+// the progress bar reaches 100% when the output finishes rather than
+// stalling at 1/factor (speed-ups) or running past it (slowdowns).
+func applySpeedFactor(args []string, total time.Duration) time.Duration {
+	if f := speedFactorFromArgs(args); f > 0 && f != 1 && total > 0 {
+		return time.Duration(float64(total) / f)
+	}
+	return total
+}
+
+// timeFlagSeconds parses the value of a time flag such as -ss/-to, taking
+// the last occurrence (ffmpeg's own precedence for output options).
+func timeFlagSeconds(args []string, flag string) (float64, bool) {
+	v, found := "", false
+	for i, a := range args {
+		if a == flag && i+1 < len(args) {
+			v, found = args[i+1], true
+		}
+	}
+	if !found {
+		return 0, false
+	}
+	s, err := ffx.ParseTimeSpec(v)
+	if err != nil {
+		return 0, false
+	}
+	return s, true
 }

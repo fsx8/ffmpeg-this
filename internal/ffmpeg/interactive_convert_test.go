@@ -281,6 +281,27 @@ func TestInteractiveConvert_WebmDropsSubtitles(t *testing.T) {
 	}
 }
 
+// A bitmap subtitle (PGS) cannot be converted to mov_text — ffmpeg only
+// converts text to text — so it must be dropped from the mp4 output
+// entirely instead of producing a command that fails at the encoder.
+func TestInteractiveConvert_PgsSubtitleIntoMP4IsDropped(t *testing.T) {
+	tracks := []Track{
+		{Index: 0, Type: TrackVideo, Codec: "h264"},
+		{Index: 2, Type: TrackAudio, Codec: "aac"},
+		{Index: 3, Type: TrackSubtitle, Codec: "hdmv_pgs_subtitle"},
+	}
+	cmd := BuildInteractiveConvertCmd("input.mkv", "output.mp4", tracks, nil)
+	if cmd == nil {
+		t.Fatal("expected cmd (video and audio kept)")
+	}
+	if got, want := maps(cmd.Args), []string{"0:0", "0:2"}; !equalStrings(got, want) {
+		t.Fatalf("a bitmap subtitle cannot convert to mov_text; maps: got %#v want %#v", got, want)
+	}
+	if got := flagValue(cmd.Args, "-c:s:0"); got != "" {
+		t.Fatalf("expected no -c:s:0, got %q", got)
+	}
+}
+
 func TestInteractiveConvert_ConvertFlacSetsNoBitrate(t *testing.T) {
 	tracks := []Track{
 		{Index: 0, Type: TrackVideo, Codec: "h264"},
@@ -388,4 +409,92 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// The VP8/AV1 choices must carry rate-control arguments: without them
+// libvpx falls back to a 200k CBR and libaom to extremely slow defaults.
+func TestInteractiveConvert_VP8ChoiceGetsRateControl(t *testing.T) {
+	tracks := []Track{{Index: 0, Type: TrackVideo, Codec: "h264"}}
+	cmd := BuildInteractiveConvertCmd("in.mkv", "out.mkv", tracks,
+		map[int]TrackActionInfo{0: {Action: ActionConvert, Codec: "libvpx (VP8)"}})
+	if cmd == nil {
+		t.Fatal("expected cmd")
+	}
+	if got := flagValue(cmd.Args, "-c:v:0"); got != "libvpx" {
+		t.Fatalf("codec = %q, want libvpx", got)
+	}
+	if got := flagValue(cmd.Args, "-crf:v:0"); got == "" {
+		t.Fatal("VP8 conversion must set -crf (constrained quality)")
+	}
+	if got := flagValue(cmd.Args, "-b:v:0"); got == "" {
+		t.Fatal("VP8 conversion must set a bitrate ceiling")
+	}
+}
+
+func TestInteractiveConvert_AV1ChoiceGetsRateControl(t *testing.T) {
+	tracks := []Track{{Index: 0, Type: TrackVideo, Codec: "h264"}}
+	cmd := BuildInteractiveConvertCmd("in.mkv", "out.mkv", tracks,
+		map[int]TrackActionInfo{0: {Action: ActionConvert, Codec: "libaom-av1 (AV1)"}})
+	if cmd == nil {
+		t.Fatal("expected cmd")
+	}
+	if got := flagValue(cmd.Args, "-crf:v:0"); got == "" {
+		t.Fatal("AV1 conversion must set -crf")
+	}
+	if got := flagValue(cmd.Args, "-b:v:0"); got != "0" {
+		t.Fatalf("AV1 conversion must use constant quality (-b:v 0), got %q", got)
+	}
+}
+
+// HEVC landing in the MP4 family is tagged hvc1 so Apple devices recognize
+// it; copies of HEVC sources and x265 conversions both qualify.
+func TestInteractiveConvert_HevcCopyIntoMP4GetsHvc1Tag(t *testing.T) {
+	tracks := []Track{{Index: 0, Type: TrackVideo, Codec: "hevc"}}
+	cmd := BuildInteractiveConvertCmd("in.mkv", "out.mp4", tracks, nil)
+	if cmd == nil {
+		t.Fatal("expected cmd")
+	}
+	if got := flagValue(cmd.Args, "-c:v:0"); got != "copy" {
+		t.Fatalf("HEVC copy into mp4 must stay a copy, got %q", got)
+	}
+	if got := flagValue(cmd.Args, "-tag:v:0"); got != "hvc1" {
+		t.Fatalf("tag = %q, want hvc1", got)
+	}
+}
+
+func TestInteractiveConvert_HevcIntoMkvGetsNoTag(t *testing.T) {
+	tracks := []Track{{Index: 0, Type: TrackVideo, Codec: "hevc"}}
+	cmd := BuildInteractiveConvertCmd("in.mkv", "out.mkv", tracks, nil)
+	if cmd == nil {
+		t.Fatal("expected cmd")
+	}
+	if got := flagValue(cmd.Args, "-tag:v:0"); got != "" {
+		t.Fatalf("mkv output must not get an hvc1 tag, got %q", got)
+	}
+}
+
+func TestInteractiveConvert_H264IntoMP4GetsNoTag(t *testing.T) {
+	tracks := []Track{{Index: 0, Type: TrackVideo, Codec: "h264"}}
+	cmd := BuildInteractiveConvertCmd("in.mkv", "out.mp4", tracks, nil)
+	if cmd == nil {
+		t.Fatal("expected cmd")
+	}
+	if got := flagValue(cmd.Args, "-tag:v:0"); got != "" {
+		t.Fatalf("H.264 must not be tagged hvc1, got %q", got)
+	}
+}
+
+func TestInteractiveConvert_X265ConversionIntoMP4GetsHvc1Tag(t *testing.T) {
+	tracks := []Track{{Index: 0, Type: TrackVideo, Codec: "h264"}}
+	cmd := BuildInteractiveConvertCmd("in.mkv", "out.mp4", tracks,
+		map[int]TrackActionInfo{0: {Action: ActionConvert, Codec: "libx265 (H.265/HEVC)"}})
+	if cmd == nil {
+		t.Fatal("expected cmd")
+	}
+	if got := flagValue(cmd.Args, "-c:v:0"); got != "libx265" {
+		t.Fatalf("codec = %q, want libx265", got)
+	}
+	if got := flagValue(cmd.Args, "-tag:v:0"); got != "hvc1" {
+		t.Fatalf("tag = %q, want hvc1", got)
+	}
 }

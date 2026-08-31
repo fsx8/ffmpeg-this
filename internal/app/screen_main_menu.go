@@ -46,10 +46,20 @@ func newMainMenu(cfg Config) *mainMenuModel {
 
 func (m *mainMenuModel) Init() tea.Cmd { return nil }
 
+// workingDir returns the process working directory, falling back to "."
+// when it cannot be determined (e.g. a deleted cwd).
+func workingDir() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	return cwd
+}
+
 func (m *mainMenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.list.SetSize(msg.Width-4, msg.Height-4)
+		m.list.SetSize(dim(msg.Width, 4), dim(msg.Height, 4))
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q":
@@ -58,14 +68,11 @@ func (m *mainMenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if it, ok := m.list.SelectedItem().(menuItem); ok {
 				switch it.kind {
 				case "single":
-					cwd, _ := os.Getwd()
-					return m, push(newFilePicker(m.cfg, cwd))
+					return m, push(newFilePicker(m.cfg, workingDir()))
 				case "join":
-					cwd, _ := os.Getwd()
-					return m, push(newJoinWizard(m.cfg, cwd))
+					return m, push(newJoinWizard(m.cfg, workingDir()))
 				case "batch":
-					cwd, _ := os.Getwd()
-					return m, push(newBatchWizard(m.cfg, cwd))
+					return m, push(newBatchWizard(m.cfg, workingDir()))
 				case "exit":
 					return m, tea.Quit
 				}

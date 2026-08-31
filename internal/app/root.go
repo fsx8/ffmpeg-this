@@ -65,17 +65,6 @@ func (m *rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		return m, nil
-	case replaceMsg:
-		if len(m.stack) == 0 {
-			m.stack = []tea.Model{msg.m}
-		} else {
-			if m.w > 0 && m.h > 0 {
-				updated, _ := msg.m.Update(tea.WindowSizeMsg{Width: m.w, Height: m.h})
-				msg.m = updated
-			}
-			m.stack[len(m.stack)-1] = msg.m
-		}
-		return m, msg.m.Init()
 	}
 
 	cur := m.stack[len(m.stack)-1]

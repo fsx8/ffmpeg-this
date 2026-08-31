@@ -1,6 +1,7 @@
 package media
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -9,8 +10,8 @@ import (
 
 var extensions = []string{
 	".mkv", ".mp4", ".avi", ".mov", ".webm", ".flv", ".wmv", ".m4v",
-	".ts", ".mpg", ".mpeg",
-	".mp3", ".flac", ".wav", ".ogg", ".m4a", ".aac", ".opus",
+	".ts", ".m2ts", ".mpg", ".mpeg", ".ogv",
+	".mka", ".mp3", ".flac", ".wav", ".ogg", ".m4a", ".aac", ".opus",
 	".gif",
 }
 
@@ -22,22 +23,39 @@ func IsMediaFile(path string) bool {
 // ListMediaFiles returns media file names in natural order, so that
 // "part2.mp4" sorts before "part10.mp4".
 func ListMediaFiles(dir string) ([]string, error) {
-	var files []string
+	files, _, err := ListDir(dir)
+	return files, err
+}
+
+// ListDir splits a directory's entries into media file names and
+// subdirectory names, both in natural order. Hidden (dot) entries and
+// regular non-media files are omitted.
+func ListDir(dir string) (files, dirs []string, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for _, e := range entries {
-		if e.IsDir() {
+		if strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		name := e.Name()
-		if IsMediaFile(name) {
-			files = append(files, name)
+		isDir := e.IsDir()
+		// Symlinked directories look like files to ReadDir (DirEntry uses
+		// lstat); resolve them so they stay navigable.
+		if !isDir && e.Type()&fs.ModeSymlink != 0 {
+			if fi, err := os.Stat(filepath.Join(dir, e.Name())); err == nil {
+				isDir = fi.IsDir()
+			}
+		}
+		if isDir {
+			dirs = append(dirs, e.Name())
+		} else if IsMediaFile(e.Name()) {
+			files = append(files, e.Name())
 		}
 	}
 	slices.SortFunc(files, naturalCompare)
-	return files, nil
+	slices.SortFunc(dirs, naturalCompare)
+	return files, dirs, nil
 }
 
 func naturalCompare(a, b string) int {
@@ -53,8 +71,17 @@ func naturalCompare(a, b string) int {
 
 func isDigit(b byte) bool { return b >= '0' && b <= '9' }
 
-// naturalLess compares byte-by-byte, but runs of digits are compared by
-// numeric value so "file9" < "file10".
+// foldByte lowercases ASCII letters so comparisons are case-insensitive;
+// filenames rarely mix scripts where full Unicode folding would matter.
+func foldByte(b byte) byte {
+	if 'A' <= b && b <= 'Z' {
+		return b + ('a' - 'A')
+	}
+	return b
+}
+
+// naturalLess compares byte-by-byte (case-insensitively), but runs of digits
+// are compared by numeric value so "file9" < "file10".
 func naturalLess(a, b string) bool {
 	ia, ib := 0, 0
 	for ia < len(a) && ib < len(b) {
@@ -77,12 +104,18 @@ func naturalLess(a, b string) bool {
 			ia, ib = ja, jb
 			continue
 		}
-		if a[ia] != b[ib] {
-			return a[ia] < b[ib]
+		if fa, fb := foldByte(a[ia]), foldByte(b[ib]); fa != fb {
+			return fa < fb
 		}
 		ia++
 		ib++
 	}
-	// Whatever ran out of characters first is smaller.
-	return len(a)-ia < len(b)-ib
+	// Whichever string still has characters left is larger. Fully
+	// folded-equal strings fall back to a raw byte comparison so the
+	// resulting sort order is deterministic.
+	ta, tb := a[ia:], b[ib:]
+	if len(ta) != len(tb) {
+		return len(ta) < len(tb)
+	}
+	return ta < tb
 }

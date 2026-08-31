@@ -100,6 +100,25 @@ $FF -f lavfi -i testsrc2=size=320x180:rate=12:duration=60 \
     -c:v $X264 -c:a aac -b:a 64k -shortest "$OUT/long.mp4"
 echo "  long.mp4              320x180 60s (trim/progress)"
 
+# ----------------------------------------------------------------- chapters
+# chapters.mkv — basic.mp4 re-muxed with two chapters: the metadata strip
+# must drop them, tag edits must retain them.
+cat > "$OUT/chapters.txt" <<'EOF'
+;FFMETADATA1
+[CHAPTER]
+TIMEBASE=1/1000
+START=0
+END=10000
+title=Part One
+[CHAPTER]
+TIMEBASE=1/1000
+START=10000
+END=20000
+title=Part Two
+EOF
+$FF -i "$OUT/basic.mp4" -i "$OUT/chapters.txt" -map 0 -map_chapters 1 -c copy "$OUT/chapters.mkv"
+echo "  chapters.mkv          basic.mp4 + 2 chapters (metadata strip)"
+
 # ------------------------------------------------------- uhd hdr "feature"
 # hdr4k.mkv — 4K HEVC 10-bit HDR (HDR10 signaling), three audio layers
 # (DTS 5.1, EAC3 5.1, AAC stereo commentary) and four subtitle tracks

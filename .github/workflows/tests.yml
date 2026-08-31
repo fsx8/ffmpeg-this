@@ -28,3 +28,28 @@ jobs:
 
       - name: Run integration tests
         run: go test -tags=integration ./...
+
+  # Windows must keep compiling (execx process handling, path handling) and
+  # the portable unit tier green. Integration stays linux-only: the unix
+  # build tag excludes execx_test.go on windows and fixtures/ffmpeg are
+  # only set up in the linux job.
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Run unit tests
+        run: go test ./...

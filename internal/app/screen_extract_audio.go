@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 
@@ -30,21 +31,15 @@ type extractAudioWizard struct {
 
 	formatList list.Model
 	out        textinput.Model
+	guard      overwriteGuard
 
-	mode     string // "format" | "output"
-	err      string
-	warnPath string // output path the overwrite warning was armed for
-	style    lipgloss.Style
+	mode  string // "format" | "output"
+	err   string
+	style lipgloss.Style
 }
 
-type formatItem struct{ v string }
-
-func (i formatItem) Title() string       { return i.v }
-func (i formatItem) Description() string { return "" }
-func (i formatItem) FilterValue() string { return i.v }
-
 func newExtractAudioWizard(cfg Config, filePath string) *extractAudioWizard {
-	items := []list.Item{formatItem{"mp3"}, formatItem{"flac"}, formatItem{"wav"}}
+	items := []list.Item{simpleItem{value: "mp3"}, simpleItem{value: "flac"}, simpleItem{value: "wav"}}
 	l := list.New(items, list.NewDefaultDelegate(), 0, 0)
 	l.Title = "Select audio format"
 	l.SetFilteringEnabled(false)
@@ -53,18 +48,13 @@ func newExtractAudioWizard(cfg Config, filePath string) *extractAudioWizard {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 
-	out := textinput.New()
-	out.Prompt = "> "
-	out.CharLimit = 4096
-	out.Width = 40
-
 	return &extractAudioWizard{
 		cfg:        cfg,
 		filePath:   filePath,
 		loading:    true,
 		spin:       sp,
 		formatList: l,
-		out:        out,
+		out:        newPathInput(),
 		mode:       "format",
 		style:      lipgloss.NewStyle().Padding(1, 2),
 	}
@@ -72,7 +62,12 @@ func newExtractAudioWizard(cfg Config, filePath string) *extractAudioWizard {
 
 func (m *extractAudioWizard) Init() tea.Cmd {
 	return tea.Batch(m.spin.Tick, func() tea.Msg {
-		has, err := m.cfg.Prober.HasAudio(context.Background(), m.filePath)
+		if m.cfg.Prober == nil {
+			return audioCheckDoneMsg{err: errors.New("ffprobe unavailable")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+		defer cancel()
+		has, err := m.cfg.Prober.HasAudio(ctx, m.filePath)
 		return audioCheckDoneMsg{hasAudio: has, err: err}
 	})
 }
@@ -80,7 +75,7 @@ func (m *extractAudioWizard) Init() tea.Cmd {
 func (m *extractAudioWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.formatList.SetSize(msg.Width-4, msg.Height-6)
+		m.formatList.SetSize(dim(msg.Width, 4), dim(msg.Height, 6))
 	case tea.KeyMsg:
 		typing := m.mode == "output" && textInputFocused(m.out)
 		switch msg.String() {
@@ -89,7 +84,7 @@ func (m *extractAudioWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.mode = "format"
 				m.out.Blur()
 				m.err = ""
-				m.warnPath = ""
+				m.guard.armedFor = ""
 				return m, nil
 			}
 			return m, pop()
@@ -104,16 +99,16 @@ func (m *extractAudioWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			switch m.mode {
 			case "format":
-				fi, ok := m.formatList.SelectedItem().(formatItem)
+				fi, ok := m.formatList.SelectedItem().(simpleItem)
 				if !ok {
 					return m, nil
 				}
-				m.out.SetValue(ffx.ExtractAudioOutputName(m.filePath, fi.v))
+				m.out.SetValue(ffx.ExtractAudioOutputName(m.filePath, fi.value))
 				m.mode = "output"
 				m.out.Focus()
 				return m, textinput.Blink
 			case "output":
-				fi, ok := m.formatList.SelectedItem().(formatItem)
+				fi, ok := m.formatList.SelectedItem().(simpleItem)
 				if !ok {
 					return m, nil
 				}
@@ -123,16 +118,12 @@ func (m *extractAudioWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				m.err = ""
-				outPath := outName
-				if !filepath.IsAbs(outPath) {
-					outPath = filepath.Join(filepath.Dir(m.filePath), outName)
-				}
-				if outputExists(outPath) && m.warnPath != outPath {
-					m.warnPath = outPath
+				outPath := resolveOutputPath(filepath.Dir(m.filePath), outName)
+				// -y is passed to ffmpeg; make overwriting explicit.
+				if m.guard.shouldWarn(outPath) {
 					return m, nil
 				}
-				m.warnPath = ""
-				cmd := ffx.BuildExtractAudioCmd(m.filePath, fi.v, outPath)
+				cmd := ffx.BuildExtractAudioCmd(m.filePath, fi.value, outPath)
 				return m, push(newExecScreen(m.cfg, "Extracting audio…", execx.Cmd{Name: "ffmpeg", Args: cmd.Args}))
 			}
 		}
@@ -170,25 +161,17 @@ func (m *extractAudioWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *extractAudioWizard) View() string {
 	if m.loading {
-		return m.style.Render(m.spin.View() + " Checking for audio…\n\nEsc to go back")
+		return m.style.Render(m.spin.View() + " Checking for audio…\n\nEsc to go back • q to quit")
 	}
 	if !m.hasAudio {
-		return m.style.Render(lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(m.err) + "\n\nEsc to go back")
+		return m.style.Render(lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(m.err) + "\n\nEsc to go back • q to quit")
 	}
 
-	errLine := ""
-	if m.err != "" {
-		errLine = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(m.err)
-	}
+	errLine := renderErrLine(m.err)
 
 	if m.mode == "output" {
-		warnLine := ""
-		if m.warnPath != "" {
-			warnLine = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render(
-				"Output file exists: "+m.warnPath+"\nPress Enter again to overwrite, or edit the name.",
-			)
-		}
-		return m.style.Render("Output file:\n\n" + m.out.View() + errLine + warnLine + "\n\nEnter to run • Esc to go back")
+		warnLine := renderWarnLine(m.guard)
+		return m.style.Render("Output file:\n\n" + m.out.View() + errLine + warnLine + "\n\nEnter to run • Esc to go back • q to quit")
 	}
 	return m.style.Render(m.formatList.View() + "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("Enter to select format • Esc to go back • q to quit"))
 }

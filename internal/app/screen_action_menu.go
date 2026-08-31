@@ -31,6 +31,12 @@ func newActionMenu(cfg Config, filePath string) *actionMenuModel {
 		actionItem{title: "Modify Tracks", desc: "Keep/remove/convert video/audio/subs", kind: "tracks"},
 		actionItem{title: "Trim Video", desc: "Lossless cut with -c copy", kind: "trim"},
 		actionItem{title: "Extract Audio", desc: "Rip audio to mp3/flac/wav", kind: "audio"},
+		actionItem{title: "Resize Video", desc: "Scale to 480p-2160p or custom size", kind: "resize"},
+		actionItem{title: "Rotate / Flip / Crop", desc: "Rotate 90/180/270, mirror, or crop", kind: "transform"},
+		actionItem{title: "Compress Video", desc: "Shrink with a CRF quality preset", kind: "compress"},
+		actionItem{title: "Speed / Reverse / Mute", desc: "Change speed, play backwards, or remove audio", kind: "effects"},
+		actionItem{title: "Take Screenshot", desc: "Grab a single frame as png/jpg", kind: "screenshot"},
+		actionItem{title: "Edit Metadata", desc: "Edit title/artist/comment or strip all tags", kind: "metadata"},
 		actionItem{title: "Back", kind: "back"},
 	}
 	l := list.New(items, list.NewDefaultDelegate(), 0, 0)
@@ -50,7 +56,7 @@ func (m *actionMenuModel) Init() tea.Cmd { return nil }
 func (m *actionMenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.list.SetSize(msg.Width-4, msg.Height-4)
+		m.list.SetSize(dim(msg.Width, 4), dim(msg.Height, 4))
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc":
@@ -68,6 +74,18 @@ func (m *actionMenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, push(newTrimWizard(m.cfg, m.filePath))
 				case "audio":
 					return m, push(newExtractAudioWizard(m.cfg, m.filePath))
+				case "resize":
+					return m, push(newResizeWizard(m.cfg, m.filePath))
+				case "transform":
+					return m, push(newTransformWizard(m.cfg, m.filePath))
+				case "compress":
+					return m, push(newCompressWizard(m.cfg, m.filePath))
+				case "effects":
+					return m, push(newEffectsWizard(m.cfg, m.filePath))
+				case "screenshot":
+					return m, push(newScreenshotWizard(m.cfg, m.filePath))
+				case "metadata":
+					return m, push(newMetadataWizard(m.cfg, m.filePath))
 				case "back":
 					return m, pop()
 				}

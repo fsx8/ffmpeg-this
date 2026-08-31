@@ -22,6 +22,16 @@ type JoinInput struct {
 	DurationSec float64
 }
 
+// EvenDimension rounds a dimension down to the nearest even value; libx264
+// with yuv420p output refuses odd widths/heights. Values below 2 pass
+// through unchanged.
+func EvenDimension(n int) int {
+	if n < 2 {
+		return n
+	}
+	return n &^ 1
+}
+
 // BuildJoinCmd builds a concat filter command that normalizes every input
 // to the target resolution and audio sample rate.
 //
@@ -35,6 +45,8 @@ type JoinInput struct {
 // Real audio streams are normalized to stereo so that silence and sources
 // with differing channel layouts can be concatenated safely.
 func BuildJoinCmd(inputs []JoinInput, outputPath string, target JoinTargets) Cmd {
+	target.Width = EvenDimension(target.Width)
+	target.Height = EvenDimension(target.Height)
 	audioSegments := true
 	withAudio := 0
 	for _, in := range inputs {

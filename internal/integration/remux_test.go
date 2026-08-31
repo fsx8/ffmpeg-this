@@ -185,15 +185,17 @@ func TestRemuxConvertSubtitleCodec(t *testing.T) {
 	assertSeq(t, "subtitle langs", tagValues(res, "subtitle", "language"), []string{"eng", "deu", "spa", "eng"})
 }
 
-// mp4-family output keeps video/audio copies (modern ffmpeg muxes DTS into
-// mp4 with only a warning) and forces every subtitle to mov_text.
+// mp4-family output keeps the video and the muxable audio copies, quietly
+// re-encodes DTS to AAC (DTS-in-MP4 fails on older ffmpeg builds, so
+// "keep" is normalized to a compatible codec), and forces every subtitle
+// to mov_text.
 func TestRemuxToMp4AdaptsSubtitles(t *testing.T) {
 	requireTools(t)
 	res := runRemux(t, fx(t, "hdr4k.mkv"), filepath.Join(t.TempDir(), "out.mp4"), nil)
 	if v := firstStream(t, res, "video"); v.CodecName != "hevc" {
 		t.Fatalf("hevc must copy into mp4, got %s", v.CodecName)
 	}
-	assertSeq(t, "audio codecs", codecNames(res, "audio"), []string{"dts", "eac3", "aac"})
+	assertSeq(t, "audio codecs", codecNames(res, "audio"), []string{"aac", "eac3", "aac"})
 	assertSeq(t, "subtitle codecs", codecNames(res, "subtitle"), []string{"mov_text", "mov_text", "mov_text", "mov_text"})
 	assertSeq(t, "subtitle langs", tagValues(res, "subtitle", "language"), []string{"eng", "deu", "spa", "eng"})
 }

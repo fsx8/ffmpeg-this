@@ -21,6 +21,15 @@ func formatDur(d time.Duration) string {
 	return fmt.Sprintf("%02d:%02d", m, s)
 }
 
+// dim returns a-b floored at 1, so view dimensions derived from the
+// terminal size stay positive on very small terminals.
+func dim(a, b int) int {
+	if v := a - b; v > 0 {
+		return v
+	}
+	return 1
+}
+
 const (
 	barFill rune = '█'
 	barRest rune = '░'

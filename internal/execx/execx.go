@@ -8,6 +8,7 @@ import (
 	"io"
 	"os/exec"
 	"sync"
+	"time"
 )
 
 type Cmd struct {
@@ -37,9 +38,20 @@ type runner struct{}
 
 func New() Runner { return runner{} }
 
+// childProc applies the common hardening to every spawned process: it is
+// placed in its own process group (platform-specific) and Wait is bounded
+// by a delay once the process exits or the context is cancelled, so a
+// grandchild holding the output pipes open cannot hang the caller forever.
+const waitDelay = 5 * time.Second
+
+func prepareCmd(c *exec.Cmd) {
+	setProcessGroup(c)
+	c.WaitDelay = waitDelay
+}
+
 func (runner) Run(ctx context.Context, cmd Cmd) (string, string, error) {
 	c := exec.CommandContext(ctx, cmd.Name, cmd.Args...)
-	setProcessGroup(c)
+	prepareCmd(c)
 	var outBuf, errBuf bytes.Buffer
 	c.Stdout = &outBuf
 	c.Stderr = &errBuf
@@ -49,7 +61,7 @@ func (runner) Run(ctx context.Context, cmd Cmd) (string, string, error) {
 
 func (runner) RunStreaming(ctx context.Context, cmd Cmd, onStdout, onStderr func(line string)) (int, error) {
 	c := exec.CommandContext(ctx, cmd.Name, cmd.Args...)
-	setProcessGroup(c)
+	prepareCmd(c)
 	stdout, err := c.StdoutPipe()
 	if err != nil {
 		return 0, err
@@ -96,16 +108,33 @@ func scanLines(r io.Reader, cb func(line string)) {
 	}
 	buf := make([]byte, 4096)
 	var lineBuf bytes.Buffer
+	flush := func() {
+		cb(lineBuf.String())
+		lineBuf.Reset()
+	}
+	// skipLF folds a LF directly following a CR into the same line end.
+	skipLF := false
 	for {
 		n, readErr := r.Read(buf)
 		if n > 0 {
 			for _, ch := range buf[:n] {
-				if ch == '\n' {
-					cb(lineBuf.String())
-					lineBuf.Reset()
-					continue
+				if skipLF {
+					skipLF = false
+					if ch == '\n' {
+						continue
+					}
 				}
-				_ = lineBuf.WriteByte(ch)
+				switch ch {
+				case '\n':
+					flush()
+				case '\r':
+					// Bare CR is a line end too (e.g. ffmpeg status output
+					// when -nostats is absent); fold a following LF.
+					flush()
+					skipLF = true
+				default:
+					lineBuf.WriteByte(ch)
+				}
 			}
 		}
 		if readErr != nil {

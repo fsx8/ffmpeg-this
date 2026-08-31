@@ -2,6 +2,7 @@ package ffmpeg
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -101,8 +102,14 @@ func BuildInteractiveConvertCmd(inputPath, outputPath string, tracks []Track, ac
 		}
 	}
 
+	// HEVC going into the MP4 family gets the hvc1 tag for Apple
+	// compatibility; decided per video track below.
+	mp4VideoExt := isMP4VideoExt(strings.ToLower(filepath.Ext(outputPath)))
+
 	for i, ot := range videos {
-		args = appendVideoArgs(args, i, ot)
+		tagHVC1 := mp4VideoExt &&
+			(ot.final == "libx265" || (ot.final == "copy" && hevcNames[ot.track.Codec]))
+		args = appendVideoArgs(args, i, ot, tagHVC1)
 	}
 	for i, ot := range audios {
 		args = appendAudioArgs(args, i, ot)
@@ -125,28 +132,51 @@ func filterDropped(kept []outTrack) []outTrack {
 	return out
 }
 
-func appendVideoArgs(args []string, outIndex int, ot outTrack) []string {
+func appendVideoArgs(args []string, outIndex int, ot outTrack, tagHVC1 bool) []string {
 	if !ot.convert {
-		return append(args, fmt.Sprintf("-c:v:%d", outIndex), "copy")
+		args = append(args, fmt.Sprintf("-c:v:%d", outIndex), "copy")
+	} else {
+		args = append(args, fmt.Sprintf("-c:v:%d", outIndex), ot.final)
+		switch ot.final {
+		case "libx264":
+			args = append(args,
+				fmt.Sprintf("-crf:v:%d", outIndex), "23",
+				fmt.Sprintf("-preset:v:%d", outIndex), "medium",
+				fmt.Sprintf("-pix_fmt:v:%d", outIndex), "yuv420p",
+			)
+		case "libx265":
+			args = append(args,
+				fmt.Sprintf("-crf:v:%d", outIndex), "28",
+				fmt.Sprintf("-preset:v:%d", outIndex), "medium",
+			)
+		case "libvpx-vp9":
+			args = append(args,
+				fmt.Sprintf("-crf:v:%d", outIndex), "31",
+				fmt.Sprintf("-b:v:%d", outIndex), "0",
+			)
+		case "libvpx":
+			// VP8 has no constant-quality-only mode (unlike VP9/AV1): CRF
+			// acts as a quality floor in constrained-quality mode and needs
+			// a bitrate ceiling. Defaults would be a 200k CBR slug.
+			args = append(args,
+				fmt.Sprintf("-crf:v:%d", outIndex), "10",
+				fmt.Sprintf("-b:v:%d", outIndex), "2M",
+				fmt.Sprintf("-deadline:v:%d", outIndex), "good",
+				fmt.Sprintf("-cpu-used:v:%d", outIndex), "2",
+			)
+		case "libaom-av1":
+			// libaom's defaults are extremely slow and bitrate-driven; CRF
+			// plus row-mt keeps quality predictable and speeds it up.
+			args = append(args,
+				fmt.Sprintf("-crf:v:%d", outIndex), "30",
+				fmt.Sprintf("-b:v:%d", outIndex), "0",
+				fmt.Sprintf("-cpu-used:v:%d", outIndex), "4",
+				fmt.Sprintf("-row-mt:v:%d", outIndex), "1",
+			)
+		}
 	}
-	args = append(args, fmt.Sprintf("-c:v:%d", outIndex), ot.final)
-	switch ot.final {
-	case "libx264":
-		args = append(args,
-			fmt.Sprintf("-crf:v:%d", outIndex), "23",
-			fmt.Sprintf("-preset:v:%d", outIndex), "medium",
-			fmt.Sprintf("-pix_fmt:v:%d", outIndex), "yuv420p",
-		)
-	case "libx265":
-		args = append(args,
-			fmt.Sprintf("-crf:v:%d", outIndex), "28",
-			fmt.Sprintf("-preset:v:%d", outIndex), "medium",
-		)
-	case "libvpx-vp9":
-		args = append(args,
-			fmt.Sprintf("-crf:v:%d", outIndex), "31",
-			fmt.Sprintf("-b:v:%d", outIndex), "0",
-		)
+	if tagHVC1 {
+		args = append(args, fmt.Sprintf("-tag:v:%d", outIndex), "hvc1")
 	}
 	return args
 }
@@ -169,9 +199,7 @@ func appendSubtitleArgs(args []string, outIndex int, ot outTrack) []string {
 	if !ot.convert {
 		return append(args, fmt.Sprintf("-c:s:%d", outIndex), "copy")
 	}
-	codec := ot.final
-	if strings.Contains(codec, "subrip") {
-		codec = "srt"
-	}
-	return append(args, fmt.Sprintf("-c:s:%d", outIndex), codec)
+	// ot.final is already a clean codec name: CleanCodecChoice resolves the
+	// user-facing labels and NormalizeCodecForContainer adapts the result.
+	return append(args, fmt.Sprintf("-c:s:%d", outIndex), ot.final)
 }

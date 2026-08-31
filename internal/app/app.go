@@ -23,7 +23,10 @@ func CheckFFmpegFFprobe(ctx context.Context, runner execx.Runner) error {
 		if err == nil {
 			continue
 		}
-		return fmt.Errorf("%s not found in PATH. Install ffmpeg (includes ffprobe) and ensure it is in PATH.\n%s", bin, installHint())
+		// Include the underlying error so "permission denied" or a broken
+		// PATH entry is distinguishable from a plain missing binary.
+		return fmt.Errorf("%s not found in PATH (%v).\nInstall ffmpeg (includes ffprobe) and ensure it is in PATH.\n%s",
+			bin, err, installHint())
 	}
 	return nil
 }

@@ -71,6 +71,20 @@ func TestProgressTracker_MergesLines(t *testing.T) {
 	}
 }
 
+func TestProgressTracker_FPSKeepsLatestValue(t *testing.T) {
+	var tr ProgressTracker
+	tr.Observe("fps=10.0")
+	tr.Observe("fps=40.0")
+	tr.Observe("fps=20.0")
+	if s := tr.Sample(); s.FPS != 20 {
+		t.Fatalf("fps = %v, want the latest value 20", s.FPS)
+	}
+	tr.Observe("out_time_us=1000") // lines without fps must not reset it
+	if s := tr.Sample(); s.FPS != 20 {
+		t.Fatalf("fps = %v, want 20 preserved, got sample %+v", s.FPS, s)
+	}
+}
+
 func TestProgressSample_Percent(t *testing.T) {
 	cases := []struct {
 		sample ProgressSample

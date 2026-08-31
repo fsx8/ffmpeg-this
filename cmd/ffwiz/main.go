@@ -31,12 +31,14 @@ func effectiveVersion() string {
 	return version
 }
 
-// openLogFile creates ffmpeg_log.txt in the working directory, falling back
-// to a unique file in the system temp dir when the CWD is not writable
-// (read-only mounts, owned directories, …). Returns nil if logging is
+// openLogFile appends to ffmpeg_log.txt in the working directory, falling
+// back to a unique file in the system temp dir when the CWD is not writable
+// (read-only mounts, owned directories, …). Appending (instead of
+// truncating) keeps the history of successive runs and avoids clobbering
+// the log of a concurrently running instance. Returns nil if logging is
 // impossible; a missing log must never keep the app from starting.
 func openLogFile() *os.File {
-	f, err := os.Create("ffmpeg_log.txt")
+	f, err := os.OpenFile("ffmpeg_log.txt", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err == nil {
 		return f
 	}
@@ -63,6 +65,9 @@ func main() {
 	if flag.NArg() > 1 {
 		fmt.Fprintln(os.Stderr, "usage: ffwiz [optional_file_or_folder]")
 		os.Exit(2)
+	}
+	if initialPath != "" && flag.NArg() == 1 {
+		fmt.Fprintf(os.Stderr, "note: ignoring positional argument %q because -path was given\n", flag.Arg(0))
 	}
 	if initialPath == "" && flag.NArg() == 1 {
 		initialPath = flag.Arg(0)

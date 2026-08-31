@@ -62,8 +62,9 @@ jobs:
         if: steps.auth.outputs.mode != 'none'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
-          TAG="${{ inputs.tag }}"
+          TAG="$RELEASE_TAG"
           gh release view "$TAG" --repo fsx8/ffwiz --json assets --jq '.assets[].name' | tee /tmp/assets.txt
           for a in ffwiz_linux_amd64.tar.gz ffwiz_linux_arm64.tar.gz \
                    ffwiz_darwin_amd64.tar.gz ffwiz_darwin_arm64.tar.gz \
@@ -73,8 +74,10 @@ jobs:
 
       - name: Set version from tag
         if: steps.auth.outputs.mode != 'none'
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
-          VERSION="${{ inputs.tag }}"
+          VERSION="$RELEASE_TAG"
           VERSION="${VERSION#v}"
           node -e "
             const fs = require('fs');
@@ -100,9 +103,10 @@ jobs:
         if: steps.auth.outputs.mode != 'none'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
           cd npm
-          TAG="${{ inputs.tag }}"
+          TAG="$RELEASE_TAG"
           mkdir -p bin
           gh release download "$TAG" --repo fsx8/ffwiz --pattern "ffwiz_linux_amd64.tar.gz" --dir /tmp
           tar -xzf /tmp/ffwiz_linux_amd64.tar.gz -C bin

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -45,7 +46,12 @@ func newInspectScreen(cfg Config, filePath string) *inspectModel {
 
 func (m *inspectModel) Init() tea.Cmd {
 	return tea.Batch(m.spin.Tick, func() tea.Msg {
-		res, err := m.cfg.Prober.Probe(context.Background(), m.filePath)
+		if m.cfg.Prober == nil {
+			return inspectDoneMsg{err: errors.New("ffprobe unavailable")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+		defer cancel()
+		res, err := m.cfg.Prober.Probe(ctx, m.filePath)
 		return inspectDoneMsg{res: res, err: err}
 	})
 }
@@ -53,7 +59,7 @@ func (m *inspectModel) Init() tea.Cmd {
 func (m *inspectModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.vp = viewport.New(msg.Width-4, msg.Height-6)
+		m.vp = viewport.New(dim(msg.Width, 4), dim(msg.Height, 6))
 		m.vp.SetContent(m.content)
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -86,12 +92,35 @@ func (m *inspectModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *inspectModel) View() string {
 	if m.loading {
-		return m.style.Render(m.spin.View() + " Inspecting…\n\nEsc to go back")
+		return m.style.Render(m.spin.View() + " Inspecting…\n\nEsc to go back • q to quit")
 	}
 	if m.err != "" {
-		return m.style.Render(lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render("Error:\n"+m.err) + "\n\nEsc to go back")
+		return m.style.Render(lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render("Error:\n"+m.err) + "\n\nEsc to go back • q to quit")
 	}
-	return m.style.Render(m.vp.View() + "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("↑/↓ to scroll • Esc to go back"))
+	return m.style.Render(m.vp.View() + "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("↑/↓ to scroll • Esc to go back • q to quit"))
+}
+
+// hdrLabel classifies HDR color metadata into a short human-readable label.
+func hdrLabel(s ffprobe.Stream) string {
+	switch s.ColorTransfer {
+	case "smpte2084":
+		return "HDR10"
+	case "arib-std-b67":
+		return "HLG"
+	}
+	return ""
+}
+
+// bitrateLabel renders a per-stream bit rate; empty for unknown values.
+func bitrateLabel(bitRate string) string {
+	n, err := strconv.ParseFloat(bitRate, 64)
+	if err != nil || n <= 0 {
+		return ""
+	}
+	if n >= 1_000_000 {
+		return fmt.Sprintf("%0.1f Mb/s", n/1_000_000)
+	}
+	return fmt.Sprintf("%0.0f kb/s", n/1000)
 }
 
 func formatProbe(res *ffprobe.ProbeResult) string {
@@ -100,7 +129,7 @@ func formatProbe(res *ffprobe.ProbeResult) string {
 	}
 
 	bold := lipgloss.NewStyle().Bold(true)
-	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	muted := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 
 	sizeStr := "unknown"
 	if n, err := strconv.ParseFloat(res.Format.Size, 64); err == nil {
@@ -117,11 +146,11 @@ func formatProbe(res *ffprobe.ProbeResult) string {
 
 	var sb strings.Builder
 	sb.WriteString(bold.Render("File Information") + "\n")
-	sb.WriteString(fmt.Sprintf("%s %s\n", dim.Render("File:"), res.Format.Filename))
-	sb.WriteString(fmt.Sprintf("%s %s\n", dim.Render("Size:"), sizeStr))
-	sb.WriteString(fmt.Sprintf("%s %s\n", dim.Render("Duration:"), durationStr))
-	sb.WriteString(fmt.Sprintf("%s %s\n", dim.Render("Format:"), res.Format.FormatLongName))
-	sb.WriteString(fmt.Sprintf("%s %s\n", dim.Render("Bitrate:"), bitrateStr))
+	sb.WriteString(fmt.Sprintf("%s %s\n", muted.Render("File:"), res.Format.Filename))
+	sb.WriteString(fmt.Sprintf("%s %s\n", muted.Render("Size:"), sizeStr))
+	sb.WriteString(fmt.Sprintf("%s %s\n", muted.Render("Duration:"), durationStr))
+	sb.WriteString(fmt.Sprintf("%s %s\n", muted.Render("Format:"), res.Format.FormatLongName))
+	sb.WriteString(fmt.Sprintf("%s %s\n", muted.Render("Bitrate:"), bitrateStr))
 
 	writeStreams := func(kind string) {
 		var ss []ffprobe.Stream
@@ -135,14 +164,42 @@ func formatProbe(res *ffprobe.ProbeResult) string {
 		}
 		sb.WriteString("\n" + bold.Render(strings.ToUpper(kind)+" Streams") + "\n")
 		for _, s := range ss {
+			var parts []string
 			switch kind {
 			case "video":
-				sb.WriteString(fmt.Sprintf("#%d  %s  %dx%d  %s\n", s.Index, s.CodecName, s.Width, s.Height, s.RFrameRate))
+				parts = []string{
+					fmt.Sprintf("#%d", s.Index),
+					s.CodecName,
+					fmt.Sprintf("%dx%d", s.Width, s.Height),
+					s.RFrameRate + " fps",
+				}
+				if s.PixFmt != "" {
+					parts = append(parts, s.PixFmt)
+				}
+				if s.Profile != "" {
+					parts = append(parts, s.Profile)
+				}
+				if hdr := hdrLabel(s); hdr != "" {
+					parts = append(parts, hdr)
+				}
 			case "audio":
-				sb.WriteString(fmt.Sprintf("#%d  %s  %s Hz  %dch\n", s.Index, s.CodecName, s.SampleRate, s.Channels))
+				parts = []string{fmt.Sprintf("#%d", s.Index), s.CodecName}
+				if s.SampleRate != "" {
+					parts = append(parts, s.SampleRate+" Hz")
+				}
+				if s.Channels > 0 {
+					parts = append(parts, fmt.Sprintf("%dch", s.Channels))
+				}
 			default:
-				sb.WriteString(fmt.Sprintf("#%d  %s\n", s.Index, s.CodecName))
+				parts = []string{fmt.Sprintf("#%d", s.Index), s.CodecName}
 			}
+			if lang := s.Tags["language"]; lang != "" {
+				parts = append(parts, lang)
+			}
+			if br := bitrateLabel(s.BitRate); br != "" {
+				parts = append(parts, br)
+			}
+			sb.WriteString(strings.Join(parts, "  ") + "\n")
 		}
 	}
 

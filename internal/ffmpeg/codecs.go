@@ -30,19 +30,6 @@ func CodecOptions(trackType TrackType) []string {
 	}
 }
 
-func DefaultCodec(trackType TrackType) string {
-	switch trackType {
-	case TrackVideo:
-		return "libx264 (H.264)"
-	case TrackAudio:
-		return "aac"
-	case TrackSubtitle:
-		return "srt (SubRip)"
-	default:
-		return "copy"
-	}
-}
-
 // AudioCodecFor maps a user-facing audio format to an ffmpeg encoder name.
 // mp3 and wav are containers/formats, not encoders: mp3 encodes via
 // libmp3lame and wav via signed 16-bit PCM. flac and others use the native

@@ -36,9 +36,10 @@ jobs:
         id: tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DISPATCH_TAG: ${{ inputs.tag }}
         run: |
-          if [ -n "${{ inputs.tag }}" ]; then
-            echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          if [ -n "$DISPATCH_TAG" ]; then
+            echo "value=$DISPATCH_TAG" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.event_name }}" = "release" ]; then
             echo "value=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.event_name }}" = "workflow_run" ]; then
@@ -50,8 +51,10 @@ jobs:
           echo "Publishing APT repo for $(cat "$GITHUB_OUTPUT" | grep value | cut -d= -f2-)"
 
       - name: Check that GPG secrets are configured
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
         run: |
-          if [ -z "${{ secrets.APT_GPG_PRIVATE_KEY }}" ]; then
+          if [ -z "$GPG_PRIVATE_KEY" ]; then
             echo "::error::Missing secret APT_GPG_PRIVATE_KEY. See README for setup."
             exit 1
           fi
@@ -78,9 +81,10 @@ jobs:
       - name: Download .deb artifacts from the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.tag.outputs.value }}
         run: |
           mkdir -p /tmp/debs
-          gh release download "${{ steps.tag.outputs.value }}" --pattern "*.deb" --dir /tmp/debs
+          gh release download "$RELEASE_TAG" --pattern "*.deb" --dir /tmp/debs
           ls -lh /tmp/debs
 
       - name: Check out gh-pages (apt repo)
@@ -115,13 +119,12 @@ jobs:
         run: |
           set -e
           cd gh-pages/apt
-          # Packages per arch
-          dpkg-scanpackages --multiversion pool /dev/null > dists/stable/main/binary-amd64/Packages
+          # Packages per arch: --arch filters the pool to a single
+          # architecture, so each index only lists its own packages.
+          dpkg-scanpackages --arch=amd64 --multiversion pool /dev/null > dists/stable/main/binary-amd64/Packages
           gzip -k -f dists/stable/main/binary-amd64/Packages
-          # arm64 Packages: same pool, filtered by Architecture field is optional —
-          # dpkg-scanpackages lists all arches; apt handles it. Duplicate for both.
-          cp dists/stable/main/binary-amd64/Packages dists/stable/main/binary-arm64/Packages
-          cp dists/stable/main/binary-amd64/Packages.gz dists/stable/main/binary-arm64/Packages.gz
+          dpkg-scanpackages --arch=arm64 --multiversion pool /dev/null > dists/stable/main/binary-arm64/Packages
+          gzip -k -f dists/stable/main/binary-arm64/Packages
 
           # Release file (apt-ftparchive). Minimal config inline.
           cat > /tmp/apt-release.conf <<'CONF'
@@ -160,6 +163,8 @@ jobs:
           fi
 
       - name: Publish to gh-pages
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.value }}
         run: |
           cd gh-pages
           # Keep a top-level README for the Pages site.
@@ -184,7 +189,7 @@ jobs:
             echo "No APT repo changes to publish."
             exit 0
           fi
-          git commit -m "apt: publish ${{ steps.tag.outputs.value }}"
+          git commit -m "apt: publish $RELEASE_TAG"
           # Push to the gh-pages branch. The checkout above already tracks origin/gh-pages
           # when it existed; for a fresh orphan we need to set the remote explicitly.
           if git remote get-url origin >/dev/null 2>&1; then
