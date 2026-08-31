@@ -12,13 +12,21 @@ name: Publish npm package
 #     one-time manual publish; trusted publishers can only be registered for
 #     existing packages).
 #
-# Run manually: gh workflow run npm.yml -f tag=v0.1.1
+# Runs automatically after every Release (like apt.yml). Prereleases
+# (tag contains "-") are skipped so npm's `latest` dist-tag never points
+# at one. workflow_dispatch stays available for retries — note npm
+# registry immutability: an already-published version can never be
+# re-published, so a retry only makes sense when the previous run failed
+# before the publish step.
 on:
   workflow_dispatch:
     inputs:
       tag:
         description: "Release tag to publish (e.g. v0.1.1)"
         required: true
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
 
 permissions:
   contents: read
@@ -27,10 +35,31 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    if: github.repository == 'fsx8/ffwiz'
+    # Only run for the main repo's releases; for workflow_run: only act on
+    # successful runs of tag pushes (tag = head_branch), stable versions only.
+    if: >-
+      github.repository == 'fsx8/ffwiz' &&
+      (github.event_name == 'workflow_dispatch' ||
+        (github.event.workflow_run.conclusion == 'success' &&
+         startsWith(github.event.workflow_run.head_branch, 'v') &&
+         !contains(github.event.workflow_run.head_branch, '-')))
     steps:
       - name: Check out code
         uses: actions/checkout@v5
+
+      - name: Resolve release tag
+        id: tag
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          if [ -n "$DISPATCH_TAG" ]; then
+            TAG="$DISPATCH_TAG"
+          else
+            TAG="$HEAD_BRANCH"
+          fi
+          echo "value=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Publishing npm package for $TAG"
 
       - name: Set up Node
         uses: actions/setup-node@v6
@@ -62,7 +91,7 @@ jobs:
         if: steps.auth.outputs.mode != 'none'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ steps.tag.outputs.value }}
         run: |
           TAG="$RELEASE_TAG"
           gh release view "$TAG" --repo fsx8/ffwiz --json assets --jq '.assets[].name' | tee /tmp/assets.txt
@@ -75,7 +104,7 @@ jobs:
       - name: Set version from tag
         if: steps.auth.outputs.mode != 'none'
         env:
-          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ steps.tag.outputs.value }}
         run: |
           VERSION="$RELEASE_TAG"
           VERSION="${VERSION#v}"
@@ -103,7 +132,7 @@ jobs:
         if: steps.auth.outputs.mode != 'none'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ steps.tag.outputs.value }}
         run: |
           cd npm
           TAG="$RELEASE_TAG"

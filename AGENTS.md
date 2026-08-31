@@ -91,7 +91,7 @@ Releasing = push a `v*` tag on `main`. goreleaser (`.goreleaser.yaml`) then buil
 | Homebrew (macOS) | goreleaser `homebrew_casks` -> `fsx8/homebrew-tap` (needs `HOMEBREW_TAP_TOKEN` secret) |
 | Docker | goreleaser `dockers_v2` -> `ghcr.io/fsx8/ffwiz` (multi-arch, ffmpeg bundled, `Dockerfile`) |
 | apt (Ubuntu/Debian servers) | `apt.yml` workflow auto-runs on Release completion (`workflow_run` trigger — `on: release` does NOT fire because goreleaser publishes with `GITHUB_TOKEN`), signs and pushes the repo to `gh-pages` (needs `APT_GPG_PRIVATE_KEY` secret) |
-| npm | manual: `gh workflow run npm.yml -f tag=vX.Y.Z` — uses OIDC **trusted publishing** (no npm token); stages README+LICENSE into `npm/` and rewrites relative links; registered publisher: fsx8/ffwiz, workflow `npm.yml` |
+| npm | `npm.yml` auto-runs on Release completion (`workflow_run` — prereleases are skipped so `latest` never points at one); `workflow_dispatch` kept for retries (never re-publishes an existing version — registry is immutable). Uses OIDC **trusted publishing** (no npm token); stages README+LICENSE into `npm/` and rewrites relative links; registered publisher: fsx8/ffwiz, workflow `npm.yml` |
 | go install | works automatically via the module path `github.com/fsx8/ffwiz/cmd/ffwiz` |
 
 One-line installer (served from Pages): `curl -fsSL https://fsx8.github.io/ffwiz/install.sh | sudo bash` — source in `scripts/install.sh`, re-copied to `gh-pages` by `apt.yml` on each release.
